@@ -7,6 +7,10 @@ guided phase by phase, following official docs.
 This repo ships a **runnable Phase 0** (the plumbing) plus the full curriculum as a
 Claude skill in `.claude/skills/saas-lab/`. Phases 1–8 you build yourself, guided.
 
+📓 **Engineering notes:** [`docs/`](docs/README.md) — a per-phase log of what was
+built, why, and the trade-offs. It's a reusable boilerplate: fork it, and fill in a
+note per phase (copy [`docs/_TEMPLATE.md`](docs/_TEMPLATE.md)) as you build.
+
 ## What's already here (Phase 0)
 
 - Django + Django REST Framework backend with a real `/api/health/` check
@@ -64,6 +68,7 @@ deskly/
   frontend/           React + TypeScript (Vite)
   docker-compose.yml  Postgres + Redis + backend + frontend
   Makefile            make up / down / logs / migrate / sh / test
+  docs/               per-phase engineering notes (start at docs/README.md)
   .env.example        copy to .env
   .claude/skills/
     saas-lab/         the full guided curriculum (SKILL.md + references)
