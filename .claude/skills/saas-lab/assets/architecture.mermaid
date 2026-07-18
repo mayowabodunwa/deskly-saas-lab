@@ -1,0 +1,54 @@
+flowchart TB
+    subgraph client["Client"]
+        UI["React + TypeScript SPA<br/>(Vite)"]
+        EXT["Customer systems<br/>(API + webhooks)"]
+        CLAUDE["Claude / MCP client<br/>(Claude Desktop or app)"]
+    end
+
+    subgraph edge["Edge"]
+        PROXY["Reverse proxy<br/>Nginx / Ingress"]
+    end
+
+    subgraph app["Application plane"]
+        API["Django + DRF<br/>web (sessions) + API (JWT)"]
+        ADMIN["Django Admin<br/>impersonation + flags"]
+        MCP["MCP server<br/>(FastMCP) exposes Deskly tools"]
+    end
+
+    subgraph async["Async plane"]
+        BEAT["Celery Beat<br/>(scheduler)"]
+        WORKER["Celery workers<br/>exports · email · webhooks"]
+    end
+
+    subgraph data["Data + infra"]
+        PG[("Postgres<br/>primary DB")]
+        REDIS[("Redis<br/>cache + broker")]
+        OBJ[("Object storage<br/>MinIO → S3")]
+        MAIL["Email<br/>MailHog → SES"]
+    end
+
+    subgraph ai["AI plane"]
+        LLM["LLM API<br/>(Anthropic)"]
+    end
+
+    UI --> PROXY
+    EXT --> PROXY
+    PROXY --> API
+    PROXY --> ADMIN
+    CLAUDE --> MCP
+
+    API --> PG
+    API --> REDIS
+    ADMIN --> PG
+    MCP --> API
+
+    API -- enqueue --> REDIS
+    BEAT -- schedule --> REDIS
+    REDIS --> WORKER
+    WORKER --> PG
+    WORKER --> OBJ
+    WORKER --> MAIL
+    WORKER -- POST --> EXT
+
+    API --> LLM
+    MCP --> LLM
