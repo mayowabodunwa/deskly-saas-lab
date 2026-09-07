@@ -24,3 +24,22 @@ architectural choices (think lightweight ADRs — Architecture Decision Records)
 |-------|-------|--------|
 | 0 — Foundation | [phase-0-foundation.md](phase-0-foundation.md) | ✅ Verified |
 | 1 — Domain model & multi-tenancy | [phase-1-domain-multitenancy.md](phase-1-domain-multitenancy.md) | 🚧 In progress |
+
+## Working documents
+
+Written *during* the build, these are the raw material the course articles are
+compiled from.
+
+| Document | What it holds |
+|---|---|
+| [adr/](adr/) | Architecture Decision Records — one significant decision per file, immutable |
+| [known-gaps.md](known-gaps.md) | Risk register: every lab shortcut vs. what production does, and when it must be closed |
+| [troubleshooting-log.md](troubleshooting-log.md) | Append-only log of real errors, gotchas and dead ends. Errors quoted verbatim |
+| [concepts/](concepts/) | Plain-English system-design notes, one per concept |
+
+## Published course
+
+`../content/course/` holds the public-facing articles — one per phase, each
+framed around a realistic support ticket with a break-it/fix-it exercise.
+Articles are compiled at the **end** of each phase and stay `draft: true` until
+reviewed. See [the course outline](../content/course/README.md).
