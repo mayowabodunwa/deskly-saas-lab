@@ -56,8 +56,10 @@ circular imports and keeps the boundary clear.
 
 ## Build slices
 
-- [ ] Slice 1 — `organizations` app: `Organization` + `Membership` models,
-      registered in `INSTALLED_APPS`.
+- [x] Slice 1 — `organizations` app: `Organization` + `Membership` models,
+      registered in `INSTALLED_APPS`. **Verified 2026-09-07** — table shape
+      confirmed in psql; duplicate `slug` and duplicate `(organization, user)`
+      both rejected by Postgres with `IntegrityError`.
 - [ ] Slice 2 — `tickets` app: `Ticket` + `Comment` with a `for_org` scoping
       manager; migrate; inspect tables.
 - [ ] Slice 3 — tenant resolution (per-request org) + guard writes
@@ -73,9 +75,38 @@ circular imports and keeps the boundary clear.
 - Posting a ticket with `organization_id` set to B's id still lands in A.
 - A test asserts the isolation so it can never silently regress.
 
+## Commands used
+
+```bash
+# create the app (bind mount means files appear on the host immediately)
+docker compose exec backend mkdir -p apps/organizations
+docker compose exec backend python manage.py startapp organizations apps/organizations
+
+# schema changes: write the file, then apply it
+docker compose exec backend python manage.py makemigrations organizations
+docker compose exec backend python manage.py migrate
+
+# inspect the real table, not Django's idea of it
+docker compose exec db psql -U deskly -d deskly -c "\d organizations_membership"
+```
+
 ## Gotchas
 
 - Empty list where data should be → the org didn't resolve; base queryset
   correctly failed closed. Check the tenant-resolution layer.
 - Cross-tenant leak in a new endpoint → someone used `Ticket.objects.all()`
   directly instead of `for_org`.
+- **N+1 queries on reverse relations.** `[m.organization.name for m in
+  user.memberships.all()]` costs 1 query for the memberships plus 1 *per row*
+  to fetch each organization. Invisible with test data, fatal at scale — the
+  cause of "slow for one customer only" tickets. Fix: `select_related` for
+  forward (one) relations, `prefetch_related` for reverse (many) relations.
+  Measure with `reset_queries()` + `len(connection.queries)` (needs `DEBUG=1`).
+- **Id sequences have gaps.** A failed insert still consumes its id — Postgres
+  allocates the number before checking constraints, and does not give it back.
+  Acme is id 1 and Globex id 3 because a rejected duplicate ate id 2. Never
+  read "highest id" as "row count", and never expose ids as a customer count —
+  a second argument for routing by `slug` (see ADR-0002).
+- **Django auto-indexes every foreign key.** You will see indexes in `\d` that
+  you never declared. Useful, but not free: each index slows writes slightly
+  and costs disk.
