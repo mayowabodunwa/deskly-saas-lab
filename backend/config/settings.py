@@ -22,6 +22,7 @@ INSTALLED_APPS = [
     "rest_framework",
     "apps.core",
     "apps.organizations",
+    "apps.tickets",
 ]
 
 MIDDLEWARE = [

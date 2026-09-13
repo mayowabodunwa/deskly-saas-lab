@@ -54,14 +54,40 @@ circular imports and keeps the boundary clear.
 - **Enforce invariants in the DB** — a `UniqueConstraint(organization, user)`
   prevents duplicate memberships even if application code has a bug/race.
 
+### Slice 2 model choices
+
+- **`Comment` carries its own `organization`**, even though it could reach one
+  through `ticket`. The rule is then uniform — *every* tenant-scoped table has
+  the column — so a reviewer can check it mechanically, with no per-model
+  exceptions, and comments can be filtered and indexed without a join. The cost
+  is that the two could theoretically disagree (a comment stamped Org B
+  pointing at Org A's ticket); nothing in the schema prevents that, so it is
+  covered by test instead (see GAP note below).
+- **`on_delete` is a business decision, not a technical one.** The same file
+  answers it three different ways, each by asking what the business wants:
+  `organization` → `CASCADE` (a customer leaves, their data goes — that is what
+  "delete my data" means legally); `created_by` / `assignee` → `SET_NULL` (an
+  employee leaves, the org keeps its support history; `CASCADE` here would be a
+  data-loss incident triggered by an HR action); Slice 1's `Membership.user` →
+  `CASCADE` (a membership without a user is meaningless).
+- **`for_org` lives on a `QuerySet`, not a `Manager`,** so it chains:
+  `Ticket.objects.for_org(org).filter(status="open")` works, and so does
+  `.count()` after it. On a `Manager` it would work once and then dead-end —
+  and a safety rail people cannot use in the middle of a query is a safety rail
+  people route around.
+- **No `created_by` yet.** There are no logins until Phase 2, so there is
+  nothing to put in the field. Added when it can be filled in.
+
 ## Build slices
 
 - [x] Slice 1 — `organizations` app: `Organization` + `Membership` models,
       registered in `INSTALLED_APPS`. **Verified 2026-09-07** — table shape
       confirmed in psql; duplicate `slug` and duplicate `(organization, user)`
       both rejected by Postgres with `IntegrityError`.
-- [ ] Slice 2 — `tickets` app: `Ticket` + `Comment` with a `for_org` scoping
-      manager; migrate; inspect tables.
+- [x] Slice 2 — `tickets` app: `Ticket` + `Comment` with a `for_org` scoping
+      manager; migrate; inspect tables. **Verified 2026-09-10** — tables
+      created and inspected in psql; the cross-tenant leak reproduced
+      deliberately in the Django shell, then closed with `for_org`.
 - [ ] Slice 3 — tenant resolution (per-request org) + guard writes
       (never trust client-supplied `organization_id`).
 - [ ] Slice 4 — `seed_demo` management command (two orgs with sample tickets).
@@ -90,12 +116,48 @@ docker compose exec backend python manage.py migrate
 docker compose exec db psql -U deskly -d deskly -c "\d organizations_membership"
 ```
 
+Slice 2 followed the same shape:
+
+```bash
+docker compose exec backend mkdir -p apps/tickets
+docker compose exec backend python manage.py startapp tickets apps/tickets
+# add "apps.tickets" to INSTALLED_APPS, then:
+docker compose exec backend python manage.py makemigrations tickets
+docker compose exec backend python manage.py migrate
+docker compose exec db psql -U deskly -d deskly -c "\d tickets_ticket"
+```
+
+Reproducing the leak, in `manage.py shell`:
+
+```python
+from apps.organizations.models import Organization
+from apps.tickets.models import Ticket
+acme = Organization.objects.get(slug="acme")
+globex = Organization.objects.get(slug="globex")
+Ticket.objects.create(organization=acme, subject="Printer won't work")
+Ticket.objects.create(organization=globex, subject="Globex merger plans")
+
+# what the buggy page does — returns BOTH companies' tickets
+list(Ticket.objects.values_list("organization__slug", "subject"))
+
+# what it should do
+list(Ticket.objects.for_org(acme).values_list("organization__slug", "subject"))
+```
+
 ## Gotchas
 
 - Empty list where data should be → the org didn't resolve; base queryset
   correctly failed closed. Check the tenant-resolution layer.
-- Cross-tenant leak in a new endpoint → someone used `Ticket.objects.all()`
-  directly instead of `for_org`.
+- **Cross-tenant leak in a new endpoint** → someone used `Ticket.objects.all()`
+  directly instead of `for_org`. Reproduced deliberately in Slice 2. Three
+  things make this the access-control failure that actually reaches production:
+  the dangerous call is the *shorter, more natural* one that every Django
+  tutorial teaches first; it raises no error, because the code does exactly
+  what it says — it just answers a different question than intended; and with
+  one tenant in a dev database the safe and unsafe queries return identical
+  results, so it stays invisible until a second customer exists. Adding
+  `for_org` does **not** remove `.objects.all()` — the dangerous path is still
+  there. That is why the mitigation is a test (Slice 5), not a convention.
 - **N+1 queries on reverse relations.** `[m.organization.name for m in
   user.memberships.all()]` costs 1 query for the memberships plus 1 *per row*
   to fetch each organization. Invisible with test data, fatal at scale — the
