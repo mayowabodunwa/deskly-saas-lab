@@ -78,6 +78,104 @@ circular imports and keeps the boundary clear.
 - **No `created_by` yet.** There are no logins until Phase 2, so there is
   nothing to put in the field. Added when it can be filled in.
 
+### Slice 3 — how a URL becomes a response
+
+The mental model for the whole request path. **A view is simply the function a
+URL is configured to call, and whatever it returns is what the caller receives.**
+Nothing more mystical than that.
+
+```
+  curl /api/orgs/acme/tickets/
+            │
+            ▼
+  config/urls.py                    the routing table — "which function handles this?"
+    path("api/orgs/", include("apps.organizations.urls"))
+            │  strips "api/orgs/", passes "acme/tickets/" onward
+            ▼
+  apps/organizations/urls.py
+    path("<slug:slug>/", views.organization_detail)   ← tried first, needs the URL to END here
+    path("<slug:slug>/", include("apps.tickets.urls"))  ← "acme/" captured as slug=acme
+            │  strips "acme/", passes "tickets/" onward
+            ▼
+  apps/tickets/urls.py
+    path("tickets/", views.ticket_list)
+            │
+            ▼
+  apps/tickets/views.py
+    def ticket_list(request, slug):        ← slug="acme", handed down from the outer pattern
+        organization = get_object_or_404(Organization, slug=slug)   1. RESOLVE the tenant
+        tickets = Ticket.objects.for_org(organization)              2. SCOPE the query
+        return Response(TicketSerializer(tickets, many=True).data)  3. TRANSLATE to JSON
+            │
+            ▼
+  HTTP/1.1 200 OK + JSON body
+```
+
+**Four things that model explains:**
+
+- **`urls.py` is a lookup table, matched top to bottom, first match wins.** Two
+  patterns can share a prefix: `<slug:slug>/` matches `/api/orgs/acme/` only
+  when the URL *ends* there, so `/api/orgs/acme/tickets/` falls through to the
+  `include` on the next line. Order is significant.
+- **`<slug:slug>` is two different words.** The first is the *type* of value
+  allowed (letters, digits, hyphens, underscores — never a `/`); the second is
+  the *name* it arrives under in the view. They coincide here by choice.
+  Captured values propagate through nested `include()`s, which is why
+  `ticket_list` receives `slug` without asking for it.
+- **A view returns a response; the return value *is* the API.** `Response({...})`
+  builds JSON by hand — fine for a few fields. A **serializer** describes the
+  translation once and handles both directions (row → JSON out, JSON → validated
+  data in). `many=True` means "a list of these".
+- **The routing table is built once at startup, not per request.** So a mistake
+  in `urls.py` or `settings.py` prevents the process from booting at all.
+
+**Order inside the view is the safety property.** Resolve first, scope second.
+`for_org()` can never run without an organization to scope to, because the line
+above it either produced one or ended the request with a 404.
+
+### Slice 3 — status codes are part of the design
+
+| Code | Meaning here | Why it was chosen |
+|---|---|---|
+| `200 OK` | found and returned | |
+| `201 Created` | a POST made something new | distinct from 200 so the caller knows a resource now exists |
+| `301 Moved Permanently` | trailing slash added | Django's `APPEND_SLASH`. Redirects are GET-only — a slash-less `POST` loses its body, a classic silent "the form submits but nothing saves" |
+| `400 Bad Request` | serializer validation failed | the caller's input is wrong; nothing on the server is broken |
+| `404 Not Found` | no such slug — **and, later, "not yours"** | see below |
+| `500` | the server itself failed | should never be the answer to a bad URL |
+
+**404 over 403 for another tenant's data.** `403 Forbidden` confirms the thing
+exists. If a foreign org returns 403 while a nonsense slug returns 404, the
+difference between the two answers enumerates the customer list — try `tesla`,
+`stripe`, `monzo`, and the status code tells you who is a customer. Returning
+404 for both reveals nothing. The rule: **never confirm the existence of
+something the caller has no right to know about.**
+
+`get_object_or_404` exists for exactly this. `Organization.objects.get()` raises
+`DoesNotExist` → an unhandled 500, which claims the server broke when in fact
+someone simply typed a bad URL. Wrong status codes send whoever is on call to
+look in the wrong place.
+
+*(Production nicety not yet applied: DRF's default 404 body,
+`"No Organization matches the given query."`, names the model. Real deployments
+flatten it to `"Not found."`)*
+
+### Slice 3 — resolution is not authorization
+
+Resolving the tenant from the URL answers *which* org the request concerns. It
+does **not** answer whether the caller is entitled to it. With no authentication
+until Phase 2, any caller can substitute any slug:
+
+```
+curl -i http://localhost:8000/api/orgs/globex/   →   200 OK, Globex's record
+```
+
+The app behaved correctly and still handed over another tenant's data, because
+the URL was treated as both the question and the permission. Tracked as
+**GAP-006 (🔴)**; closes in Phase 2, where the resolved org is checked against
+the caller's `Membership`. Note that `for_org()` is no defence here — the filter
+is applied perfectly, to the wrong org. The query was right; the question wasn't.
+
 ## Build slices
 
 - [x] Slice 1 — `organizations` app: `Organization` + `Membership` models,
@@ -88,8 +186,13 @@ circular imports and keeps the boundary clear.
       manager; migrate; inspect tables. **Verified 2026-09-10** — tables
       created and inspected in psql; the cross-tenant leak reproduced
       deliberately in the Django shell, then closed with `for_org`.
-- [ ] Slice 3 — tenant resolution (per-request org) + guard writes
-      (never trust client-supplied `organization_id`).
+- [x] Slice 3 — tenant resolution (per-request org) + guard writes
+      (never trust client-supplied `organization_id`). **Verified 2026-09-14** —
+      `/api/orgs/<slug>/tickets/` returns only that org's tickets; a POST to
+      Acme's URL carrying `"organization": 3` still lands in Acme. The
+      vulnerable variant was built deliberately, shown to leak into Globex, then
+      reverted and the planted rows deleted by id. Authorization is **not** done
+      — GAP-006 stays open until Phase 2.
 - [ ] Slice 4 — `seed_demo` management command (two orgs with sample tickets).
 - [ ] Slice 5 — isolation test proving Org A can't read Org B's data.
 
@@ -144,8 +247,44 @@ list(Ticket.objects.values_list("organization__slug", "subject"))
 list(Ticket.objects.for_org(acme).values_list("organization__slug", "subject"))
 ```
 
+```bash
+# Slice 3 — tenant resolution over HTTP
+docker compose up -d db backend
+
+# resolve an org from the URL
+curl -i http://localhost:8000/api/orgs/acme/
+
+# status codes worth seeing side by side
+curl -i http://localhost:8000/api/orgs/globex/         # 200 — and see GAP-006
+curl -i http://localhost:8000/api/orgs/nosuchcompany/  # 404
+curl -i http://localhost:8000/api/orgs/acme            # 301 -> /api/orgs/acme/
+
+# tenant-scoped ticket lists
+curl http://localhost:8000/api/orgs/acme/tickets/      # 2 tickets
+curl http://localhost:8000/api/orgs/globex/tickets/    # 1 ticket
+
+# when the server goes silent, read its last words
+docker compose logs --tail=40 backend
+```
+
 ## Gotchas
 
+- **`curl: (52) Empty reply from server`** → the server is *dead*, not unhappy.
+  A 404 or 500 means the process is alive and answering; silence means it never
+  finished booting. `urls.py` and `settings.py` are imported once at startup to
+  build the routing table, so an error there stops the process before it can
+  serve anything — including an error page. Only the container logs hold the
+  reason: `docker compose logs --tail=40 backend`. First move on silence is
+  always the logs, never another curl.
+- **Read a traceback from the bottom.** The last line is the error
+  (`NameError: name 'include' is not defined`); the lowest line naming a file
+  under `/app/` is where it happened. Everything between is framework
+  scaffolding. Real instance: adding `include(...)` to
+  `organizations/urls.py` without adding it to
+  `from django.urls import path` — one missing word took the whole server down.
+- **A redirect drops a POST body.** `APPEND_SLASH` turns `/api/orgs/acme` into a
+  301 to `/api/orgs/acme/`. Harmless for GET, silent data loss for POST. Always
+  write the trailing slash.
 - Empty list where data should be → the org didn't resolve; base queryset
   correctly failed closed. Check the tenant-resolution layer.
 - **Cross-tenant leak in a new endpoint** → someone used `Ticket.objects.all()`

@@ -117,5 +117,96 @@ convenience.)
 
 ---
 
+## 🔴 GAP-006 — Tenant resolution has no authorization behind it
+
+**Where:** `backend/apps/organizations/views.py`, `backend/apps/organizations/urls.py`
+
+```python
+@permission_classes([AllowAny])
+def organization_detail(request, slug):
+    organization = get_object_or_404(Organization, slug=slug)
+```
+
+**What we did:** the current organization is resolved from the URL
+(`/api/orgs/<slug>/`). That answers *which* tenant the request concerns — and
+nothing else. Any caller can substitute any slug and receive that
+organization's data.
+
+Demonstrated in Phase 1 Slice 3 from an unauthenticated shell:
+
+    curl -i http://localhost:8000/api/orgs/globex/
+    HTTP/1.1 200 OK
+    {"id":3,"name":"Globex","slug":"globex","plan":"free"}
+
+**What production does:** resolution and authorization are two separate steps,
+both mandatory. After resolving the org from the URL, the server checks that the
+**authenticated** caller holds a `Membership` in it, and returns 404 if not.
+The URL is treated as a *request* for a tenant, never as proof of entitlement.
+
+**Why it matters:** this is the highest-severity bug class in SaaS — horizontal
+privilege escalation / IDOR. It needs no tooling and no skill to exploit: a
+customer edits the company name in their address bar and reads a competitor's
+data. `for_org()` does not help here, because the filter is applied faithfully
+to the *wrong* org. The query is correct; the question was not.
+
+**Why it is open:** authentication does not exist until Phase 2, so there is no
+"who is asking" to check a membership against. Closing it requires logins first.
+
+**Trigger to close:** Phase 2, in the same slice that introduces sessions/JWT.
+The `Membership` model (Slice 1) already holds exactly the fact the check needs.
+Nothing may be exposed beyond localhost until this is closed.
+
+**Course value:** the cleanest possible demonstration that **resolution is not
+authorization** — the app correctly identified the tenant and still handed over
+the data. Pairs with the "I can see another company's data" support ticket that
+frames the Phase 1 article.
+
+---
+
+## 🟠 GAP-007 — `Comment.organization` can drift from `comment.ticket.organization`
+
+**Where:** `backend/apps/tickets/models.py`
+
+`Comment` stores `organization` directly *and* reaches the same fact through
+`ticket.organization`. Nothing in the schema forces the two to agree, so a
+comment can claim to belong to Acme while hanging off a Globex ticket.
+
+**What production does:** enforces the invariant — validation in `save()`/
+`clean()`, a database `CheckConstraint` or trigger, or by not duplicating the
+column at all and accepting the join.
+
+**Why it matters:** the duplicated column was added so comment queries can
+filter by tenant without joining through tickets. That speed is only safe while
+the copies agree. If they diverge, the two tenant-scoped queries return
+*different* answers for the same comment — and one of them leaks it into the
+wrong org's view.
+
+**Trigger to close:** Phase 1 Slice 5, alongside the isolation test — the same
+test file should assert a mismatched comment is rejected.
+
+---
+
+## 🟡 GAP-008 — Editor cannot see the container's installed packages
+
+**Where:** developer tooling; `.devcontainer/backend/devcontainer.json`
+
+Dependencies are installed inside the `backend` image, not on the host. A VS Code
+session running on the host reports false errors such as
+`Import "rest_framework.permissions" could not be resolved` on code that runs
+correctly, and there are no Django type stubs, so Pylance also flags real runtime
+attributes (e.g. `ticket_id`).
+
+**What production teams do:** develop inside the container (Dev Containers) so
+the editor and the runtime share one interpreter, and add `django-stubs` for
+accurate type information.
+
+**Why it matters:** false alarms train you to ignore the editor, which is exactly
+when it catches a genuine typo. Harmless to the running app; corrosive to the
+feedback loop.
+
+**Trigger to close:** whenever the noise becomes annoying. No production impact.
+
+---
+
 <!-- New gaps: assign the next GAP-NNN, pick a severity, and always fill in the
      trigger. A gap with no trigger becomes permanent by accident. -->

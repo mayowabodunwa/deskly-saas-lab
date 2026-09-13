@@ -27,6 +27,158 @@ character.
 
 ---
 
+## 2026-09-14 — `GOTCHA` — Phase 1 / Slice 3 — A POST chose its own tenant
+
+**Symptom**
+A ticket created against Acme's URL was written into Globex's data. The request
+succeeded; nothing indicated anything was wrong:
+
+```
+curl -i -X POST http://localhost:8000/api/orgs/acme/tickets/ \
+  -H "Content-Type: application/json" \
+  -d '{"subject":"Planted by Acme","body":"this should not be in Globex","organization":3}'
+
+HTTP/1.1 201 Created
+```
+
+`GET /api/orgs/globex/tickets/` then listed a ticket authored by a caller who
+had only ever addressed Acme. Status 201, no error, no log line, no failing test.
+
+**What it means**
+A cross-tenant **write**. The read-side leak found in Slice 2 exposed data; this
+one lets a caller *plant* data inside another customer's account — which can be
+worse, because the victim's own users then trust and act on it. Same OWASP
+category as Slice 2 (broken access control), opposite direction of travel.
+
+The attack needs no tooling and no skill: change one number in a JSON body.
+
+**Root cause**
+The organization was taken from client input instead of from the resolved
+tenant. Reproduced deliberately by weakening two independent guards at once:
+
+```python
+# serializers.py — organization exposed as a writable field
+fields = ["id", "organization", "subject", "body", "status", "created_at", "updated_at"]
+
+# views.py — nothing overrides what the client sent
+serializer.save()
+```
+
+Either guard alone was sufficient. Verified by weakening each in isolation:
+
+- `serializer.save()` with `organization` **absent** from `fields` → no org is
+  ever set → `IntegrityError` on the `NOT NULL` column → **500**. Loud, obvious,
+  no leak.
+- `organization` **present** in `fields` but `save(organization=organization)`
+  retained → the server's value overwrites the client's → no leak.
+
+Both had to be removed before anything escaped. That is the defence-in-depth
+working as designed.
+
+**Fix**
+Restore both layers:
+
+```python
+# serializers.py — organization is not on the menu at all
+fields = ["id", "subject", "body", "status", "created_at", "updated_at"]
+
+# views.py — the tenant is stamped on server-side, from the resolved org
+serializer.save(organization=organization)
+```
+
+Re-ran the identical POST: `201 Created`, ticket lands in **Acme**, Globex
+unchanged. The `"organization": 3` in the body is silently ignored — note
+*ignored*, not rejected, which is DRF's default for undeclared fields and worth
+remembering when a client swears they sent a field that never took effect.
+
+Planted rows removed by id (`Ticket.objects.filter(id__in=[...]).delete()`),
+after printing every row first — a filter is a description and can match more
+than intended; ids are exact.
+
+**Lesson**
+The vulnerable line and the safe line differ by twenty-six characters:
+
+```python
+serializer.save()                            # vulnerable
+serializer.save(organization=organization)   # safe
+```
+
+Both return 201. Both read naturally. The dangerous one is what every
+single-tenant DRF tutorial shows, because there it is simply correct — the bug
+is created by the *context*, not by the code looking wrong. This is why it
+survives code review: a reviewer reads `serializer.save()` as "save the thing",
+not as "and the customer whose data this becomes is now decided by whoever sent
+the request".
+
+Two consequences for how we build from here:
+1. **Never derive a tenant from the request body.** The org comes from the URL
+   or the session, resolved server-side, always.
+2. **Keep both layers even though either would do.** One layer is a convention
+   somebody can innocently delete — e.g. adding `"organization"` to `fields` to
+   show it in a response. Two independent layers mean a single reasonable-looking
+   edit cannot silently reopen the tenant boundary.
+
+Related: GAP-006 — resolving the tenant from the URL still does not check that
+the caller is *entitled* to it. That half cannot close until Phase 2 adds logins.
+
+---
+
+## 2026-09-14 — `ERROR` — Phase 1 / Slice 3 — Server died silently on a missing import
+
+**Symptom**
+
+```
+curl: (52) Empty reply from server
+```
+
+No status code, no error page, no JSON. The connection opened and closed with
+nothing sent. Previous requests to the same server had worked moments earlier.
+
+**What it means**
+The process is not running. A `404` or `500` proves a server is alive and
+answering; **silence means it never finished booting**. These are different
+failures needing different first moves — one is debugged from the response, the
+other only from the logs.
+
+**Root cause**
+`docker compose logs --tail=40 backend` ended with:
+
+```
+  File "/app/apps/organizations/urls.py", line 7, in <module>
+    path("<slug:slug>/", include("apps.tickets.urls")),
+                         ^^^^^^^
+NameError: name 'include' is not defined
+```
+
+`include(...)` was added to the URL patterns, but the import line still read
+`from django.urls import path`. Django imports `urls.py` **once at startup** to
+build the routing table, so an error there stops the process before it can serve
+anything — including an error page describing the problem.
+
+**Fix**
+
+```python
+from django.urls import include, path
+```
+
+The dev server auto-reloaded and the endpoint answered normally.
+
+**Lesson**
+Two habits, both cheap:
+
+1. **On silence, read the logs — do not curl again.** The server printed its
+   last words to stdout and then stopped existing. Nothing over HTTP will ever
+   tell you why.
+2. **Read a traceback from the bottom.** The final line is the actual error; the
+   lowest line naming a file under `/app/` is where it happened. Everything
+   between is framework scaffolding. Forty intimidating lines collapsed to
+   "one word missing from an import".
+
+Config files (`urls.py`, `settings.py`) fail differently from view code: a
+broken view gives a readable 500, a broken config gives you nothing at all.
+
+---
+
 ## 2026-09-10 — `GOTCHA` — Phase 1 / Slice 2 — One `.all()` served another company's tickets
 
 **Symptom**
