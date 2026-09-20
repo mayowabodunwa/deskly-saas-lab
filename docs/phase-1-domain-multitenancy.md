@@ -176,6 +176,89 @@ the URL was treated as both the question and the permission. Tracked as
 the caller's `Membership`. Note that `for_org()` is no defence here — the filter
 is applied perfectly, to the wrong org. The query was right; the question wasn't.
 
+### Slice 4 — one command that rebuilds the demo data
+
+Up to here every Organization and Ticket in the database was typed by hand in
+`manage.py shell`. That data exists only on this laptop. Nobody else cloning the
+repo gets it, and the isolation test in Slice 5 cannot rely on rows a human
+happened to type once.
+
+`seed_demo` fixes that: **one command that puts the database into a known state.**
+
+```bash
+docker compose exec backend python manage.py seed_demo
+```
+
+**What a management command is.** A plain Python file that Django runs *with the
+whole project already loaded* — settings read, database connected, models
+importable. That is the difference between it and a loose script: a loose script
+would have to set all of that up itself.
+
+Django finds it by location, not by registration. Any installed app may contain
+a `management/commands/` folder, and every `.py` file inside becomes a command
+named after the file:
+
+```
+backend/apps/core/management/__init__.py            <- empty, but required
+backend/apps/core/management/commands/__init__.py   <- empty, but required
+backend/apps/core/management/commands/seed_demo.py  -> manage.py seed_demo
+```
+
+The two empty `__init__.py` files are not decoration. Django imports these as
+Python packages, and a folder without `__init__.py` is not one it will search —
+so a missing empty file produces `Unknown command: 'seed_demo'` with no hint as
+to why.
+
+**Why it lives in `core`.** The command touches two apps: `organizations` and
+`tickets`. Putting it in either one makes that app depend on the other for no
+real reason. `core` is the app that belongs to no single part of the domain —
+the right home for something that spans the whole project.
+
+**Why a command, and not one of the alternatives:**
+
+| Approach | Why not |
+|---|---|
+| Typing it in `manage.py shell` | Not repeatable, and leaves no record in git. What is in the database becomes an undocumented fact about one machine. |
+| A **data migration** | Migrations run **once per environment, forever, including production**. Demo tickets would ship to real customers. Migrations are for schema and for data every environment genuinely needs. |
+| A **fixture** (`loaddata` on a JSON file) | Declarative and no code, but it pins primary keys, has nowhere to put logic, and overwrites by id. Fine for static lookup tables; poor for data meant to be rebuilt. |
+| A management command | Plain Python, version-controlled, can be made idempotent, and can be called from tests and from `make`. |
+
+**Idempotent** is the property that matters, and it is the one the first version
+failed. It means: *running it twice leaves the database exactly as running it
+once did.* The first draft used `Organization.objects.create(...)` and
+`Ticket.objects.create(...)`, and a second run raised `IntegrityError` on the
+organizations while silently tripling the tickets — three rows became nine. Full
+write-up in `docs/troubleshooting-log.md` (2026-09-20, `GOTCHA`).
+
+The fix is `get_or_create`, which forces a decision that `create` never asks
+about — **which fields identify this row, and which are just its contents:**
+
+```python
+Ticket.objects.get_or_create(
+    organization=acme,               # identity: how to recognise the row
+    subject="Printer won't work",    # identity
+    defaults={"body": "..."},        # cargo: only written when creating
+)
+```
+
+Plain arguments are the search. `defaults` is applied **only** on creation and
+never updates an existing row. Putting `body` in the search instead would have
+meant that editing one sentence of seed text created a fourth ticket rather than
+matching the third.
+
+`organization` belongs in the lookup for the same reason it belongs everywhere
+else in this phase: two tenants may each legitimately have a ticket called
+"Password reset". In a multi-tenant system, *"is this the same row?"* almost
+always means *"the same row **within this org**"*.
+
+**All-or-nothing.** Django does **not** wrap a management command in a database
+transaction by default, so the first version kept whatever it had already
+written when it failed partway — a state that is neither "before" nor "after".
+`handle()` is therefore decorated with `@transaction.atomic`: every write is held
+open until the function returns, and an exception throws all of them away. A
+successful run looks identical either way, which is why this is easy to leave
+out and easy to believe is working. Was **GAP-009**, closed 2026-09-20.
+
 ## Build slices
 
 - [x] Slice 1 — `organizations` app: `Organization` + `Membership` models,
@@ -193,7 +276,14 @@ is applied perfectly, to the wrong org. The query was right; the question wasn't
       vulnerable variant was built deliberately, shown to leak into Globex, then
       reverted and the planted rows deleted by id. Authorization is **not** done
       — GAP-006 stays open until Phase 2.
-- [ ] Slice 4 — `seed_demo` management command (two orgs with sample tickets).
+- [x] Slice 4 — `seed_demo` management command (two orgs with sample tickets).
+      **Verified 2026-09-20** — `manage.py seed_demo` run twice from an empty
+      tickets table left exactly 3 tickets across 2 orgs, every row carrying the
+      *first* run's `created_at`. The break step came for free: the naive
+      `create()` version was written first, raised `IntegrityError` on the
+      organizations and silently grew the tickets to 9, and was diagnosed from
+      `created_at` clustering before being fixed with `get_or_create`. Wired up
+      as `make seed`.
 - [ ] Slice 5 — isolation test proving Org A can't read Org B's data.
 
 ## How to verify (target)
@@ -267,6 +357,28 @@ curl http://localhost:8000/api/orgs/globex/tickets/    # 1 ticket
 docker compose logs --tail=40 backend
 ```
 
+```bash
+# Slice 4 — seed the demo data
+docker compose exec backend python manage.py seed_demo
+make seed                                    # same thing, shorter
+
+# is it idempotent? run it twice and count
+docker compose exec db psql -U deskly -d deskly -c \
+  "SELECT (SELECT count(*) FROM organizations_organization) AS orgs,
+          (SELECT count(*) FROM tickets_ticket) AS tickets;"
+
+# which rows came from which run — milliseconds tell program from human
+docker compose exec db psql -U deskly -d deskly -c \
+  "SELECT created_at, organization_id, subject FROM tickets_ticket ORDER BY created_at;"
+
+# start from a clean slate before re-testing the seed
+docker compose exec backend python manage.py shell -c \
+  "from apps.tickets.models import Ticket; Ticket.objects.all().delete()"
+
+# check every make target parses, without running any of them
+for t in up down logs migrate sh test seed; do make -n "$t"; done
+```
+
 ## Gotchas
 
 - **`curl: (52) Empty reply from server`** → the server is *dead*, not unhappy.
@@ -311,3 +423,20 @@ docker compose logs --tail=40 backend
 - **Django auto-indexes every foreign key.** You will see indexes in `\d` that
   you never declared. Useful, but not free: each index slows writes slightly
   and costs disk.
+- **A seed command must be idempotent from day one.** It gets run dozens of
+  times. `create()` inserts unconditionally; `get_or_create()` reconciles. The
+  loud half of that failure (`IntegrityError` on a unique `slug`) is the *good*
+  outcome — `Ticket` had no unique constraint, so it duplicated in silence.
+  A unique constraint is what converts silent duplication into a loud error.
+- **`defaults` never updates an existing row.** Edit the seed text, re-run, and
+  existing rows keep the old value — `get_or_create` only applies `defaults`
+  when it creates. `update_or_create` is the one that overwrites. Expect
+  "I changed the seed file and nothing changed" at least once.
+- **Empty `__init__.py` files are load-bearing.** `management/` and
+  `management/commands/` both need one, or Django never looks inside and the
+  only symptom is `Unknown command: 'seed_demo'`.
+- **Recipe lines in a Makefile must start with a literal tab.** macOS ships GNU
+  Make 3.81 (2006), which predates `.RECIPEPREFIX`, so a Makefile using `>`
+  fails everywhere with `Makefile:5: *** missing separator.  Stop.` — including
+  on targets unrelated to what you changed. Verify with `make -n <target>`,
+  which prints the commands without running them.

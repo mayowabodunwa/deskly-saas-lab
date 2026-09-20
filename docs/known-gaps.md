@@ -16,6 +16,7 @@ Each gap records: what we did, what production does, why it matters, and the
 | 🔴 Critical | Would be a breach or outage in production. Must close before any real user. |
 | 🟠 Important | Real risk, but survivable briefly. Close before launch. |
 | 🟡 Minor | Hygiene and maintainability. Close when convenient. |
+| ✅ Closed | Fixed. Entry kept, never deleted — the reasoning is the record. |
 
 ---
 
@@ -205,6 +206,60 @@ when it catches a genuine typo. Harmless to the running app; corrosive to the
 feedback loop.
 
 **Trigger to close:** whenever the noise becomes annoying. No production impact.
+
+---
+
+## ✅ GAP-009 (closed 2026-09-20) — `seed_demo` was not wrapped in a transaction
+
+**Closed by:** adding `from django.db import transaction` and decorating
+`handle()` with `@transaction.atomic`, so the command either completes or leaves
+the database untouched.
+
+**Evidence:** the code change only — `make seed` runs clean. The rollback was
+**not** demonstrated by forcing a mid-run failure, so the guarantee is taken on
+the decorator's word rather than observed. Worth proving the first time this
+command is changed.
+
+The original entry is kept below, unedited, because the reasoning is the part
+worth reading.
+
+**Where:** `backend/apps/core/management/commands/seed_demo.py` — `handle()`
+
+Django does **not** run a management command inside a database transaction by
+default. `handle()` writes organizations first and tickets second, so a failure
+partway through leaves everything already written in place and nothing rolled
+back. The database is left in a state that is neither "before" nor "after".
+
+This is survivable here only because every write uses `get_or_create`, so simply
+running the command again reconciles whatever is missing. That is a property of
+this particular command, not a general safety net.
+
+**What production teams do:** wrap the whole unit of work in
+`@transaction.atomic`, so it either completes or leaves the database untouched:
+
+```python
+from django.db import transaction
+
+class Command(BaseCommand):
+    @transaction.atomic
+    def handle(self, *args, **options):
+        ...
+```
+
+Anything that seeds or migrates real data does this as a matter of course, and
+usually pairs it with `--dry-run` and an explicit `--flush` rather than letting
+the command guess.
+
+**Why it matters:** "all or nothing" is the guarantee that makes a failed run
+safe to retry. Without it, a crash halfway through is a partially-populated
+database that looks fine until something reads the half that never arrived — and
+the symptom appears far away from the cause. For support work this is the shape
+behind "the import said it failed but some of the records are there."
+
+**Trigger to close:** the moment any seeding or data-fix command runs against
+data someone cares about — a shared staging database, or anything beyond one
+developer's laptop. Also close it immediately if a write is ever added that is
+**not** idempotent, since the re-run repair strategy stops working at that point.
 
 ---
 
