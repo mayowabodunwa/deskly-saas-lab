@@ -1,4 +1,5 @@
 from django.core.management.base import BaseCommand
+from django.db import transaction
 
 from apps.organizations.models import Organization
 from apps.tickets.models import Ticket
@@ -7,6 +8,7 @@ from apps.tickets.models import Ticket
 class Command(BaseCommand):
     help = "Create demo organizations and tickets for local development."
 
+    @transaction.atomic
     def handle(self, *args, **options):
         acme, _ = Organization.objects.get_or_create(
             slug="acme",
