@@ -27,6 +27,215 @@ character.
 
 ---
 
+## 2026-09-20 — `GOTCHA` — Phase 1 / Slice 3 — `seed_demo` turned three tickets into nine
+
+**Symptom**
+Two halves, one loud and one silent.
+
+Loud — re-running `seed_demo` when the organizations already existed:
+
+```
+django.db.utils.IntegrityError: duplicate key value violates unique constraint "organizations_organization_slug_key"
+DETAIL:  Key (slug)=(globex) already exists.
+```
+
+Silent — once the organization lines were fixed, every run reported success:
+
+```
+Seeded demo data.
+```
+
+but the ticket table kept growing:
+
+```
+orgs: 2 | tickets: 9
+```
+
+Three distinct tickets existed in the seed file. The database held nine rows.
+
+**What it means**
+The command was not **idempotent** — running it twice did not leave the database
+in the same state as running it once.
+
+The organizations failed loudly because `Organization.slug` is `unique=True`; the
+database itself refused the second row. `Ticket` has no unique field at all, so
+nothing objected, and each run appended three more rows.
+
+The loud failure was the lucky one. The silent duplication is what costs an
+afternoon.
+
+**Root cause**
+Three mechanics stacked on top of each other:
+
+1. `handle()` runs top to bottom — organizations first, tickets second. The
+   `IntegrityError` fired on an org line, so the ticket lines below it never
+   executed. Crashing runs left *no* trace in the ticket table, which made the
+   arithmetic confusing later.
+2. Django does **not** wrap a management command in a transaction by default. A
+   command that dies halfway keeps everything it already wrote. Nothing rolls back.
+3. `Ticket` has no unique constraint, so every run that reached the bottom
+   inserted three more rows, forever.
+
+`created_at` reconstructed the history — millisecond clustering distinguishes a
+program run from hand-typed data:
+
+```
+2026-09-10T02:16:11  acme   | Printer won't work      <- older lab work,
+2026-09-10T02:16:11  acme   | Password reset             2s gap before globex
+2026-09-10T02:16:13  globex | Globex merger plans
+
+2026-09-20T08:07:13  acme   | Printer won't work      <- one run: all three
+2026-09-20T08:07:13  acme   | Password reset             within 5ms
+2026-09-20T08:07:13  globex | Globex merger plans
+
+2026-09-20T08:08:50  acme   | Printer won't work      <- second run, 97s later
+2026-09-20T08:08:50  acme   | Password reset
+2026-09-20T08:08:50  globex | Globex merger plans
+```
+
+**Fix**
+`get_or_create`, which splits every call into *how to recognise the row* and
+*what to fill in if it has to build one*:
+
+```python
+# before — creates unconditionally
+Ticket.objects.create(
+    organization=acme,
+    subject="Printer won't work",
+    body="The office printer jams on every third page.",
+)
+
+# after — plain args identify, defaults only apply on creation
+Ticket.objects.get_or_create(
+    organization=acme,
+    subject="Printer won't work",
+    defaults={"body": "The office printer jams on every third page."},
+)
+```
+
+Choosing the split is a real decision, not boilerplate:
+
+- **Plain arguments** = identity. `organization` + `subject` names one ticket.
+  `organization` alone names two, and `get_or_create` runs `.get()` first, so it
+  raises `MultipleObjectsReturned: get() returned more than one Ticket -- it
+  returned 2!` rather than guessing.
+- **`defaults`** = cargo. `body` never helps identify a ticket. Leaving it as a
+  plain argument still *worked*, but put the body text into the search, so
+  editing one sentence in the seed file would have produced a fourth ticket.
+- `organization` belongs in the lookup because two tenants can legitimately both
+  have a ticket called "Password reset". Tenant scoping applies here too: "is
+  this the same row?" almost always means "the same row *within this org*".
+
+Verified by deleting the 9 rows, running the command twice, and confirming the
+count stayed at 3 with every row carrying the *first* run's timestamp.
+
+**Lesson**
+A seed command gets run dozens of times; write it idempotent on day one. More
+generally: a unique constraint is what converts silent duplication into a loud
+error, and the loud error is the outcome you want. `Organization` had one and
+told us immediately; `Ticket` had none and quietly tripled.
+
+Two follow-ons worth knowing:
+
+- `defaults` is used **only** on creation. It never updates an existing row —
+  edit the seed text and existing rows keep the old value. `update_or_create` is
+  the version that overwrites.
+- `get_or_create` is only race-safe when a database unique constraint backs the
+  lookup. Fine for a seed command run by hand; a genuine bug in a view serving
+  concurrent requests, where the fix is a `UniqueConstraint` in `Meta`.
+
+*Support angle:* "I clicked it twice and now there are two of everything" is an
+entire genre of ticket. The cause is nearly always this — an operation that
+creates instead of reconciling, with no constraint to stop it.
+
+---
+
+## 2026-09-20 — `ERROR` — Tooling — `make` on macOS is too old for the Makefile
+
+**Symptom**
+Every `make` target failed immediately, including ones that had nothing to do
+with the work in progress:
+
+```
+Makefile:5: *** missing separator.  Stop.
+```
+
+**What it means**
+Make could not parse the Makefile at all — it never got as far as running
+anything. `missing separator` means Make reached a line it expected to be a
+recipe (a command to run) and did not find the character that marks one.
+
+Make's rule is that every recipe line must begin with a literal **tab**. Not
+spaces — a tab. The two are indistinguishable on screen, which is why this error
+is a rite of passage.
+
+**Root cause**
+GNU Make 3.82 added `.RECIPEPREFIX`, which lets a Makefile choose a visible
+character instead of a tab. Ours chose `>`:
+
+```make
+.RECIPEPREFIX = >
+
+up:
+> docker compose up --build
+```
+
+macOS ships **GNU Make 3.81**, released in 2006 — older than the feature:
+
+```bash
+make --version
+# GNU Make 3.81
+# Copyright (C) 2006  Free Software Foundation, Inc.
+```
+
+3.81 read `.RECIPEPREFIX = >` as a meaningless variable assignment, ignored it,
+then hit line 5, found no tab, and gave up. The Makefile was never portable; it
+only ever worked on a machine with a newer Make installed.
+
+**Fix**
+Dropped the `.RECIPEPREFIX` line and replaced each `> ` with a real tab. Tabs
+work on every version of Make ever shipped:
+
+```make
+up:
+	docker compose up --build
+```
+
+Verified without executing anything using `-n` (dry run — print the commands,
+run none):
+
+```bash
+for t in up down logs migrate sh test seed; do make -n "$t"; done
+```
+
+The rejected alternative was `brew install make` and typing `gmake` everywhere,
+which keeps the nicer `>` syntax but adds an install step and a second command
+to remember — a bad trade for a repo meant to be cloned and run.
+
+Workaround while it was broken: run the target's command directly, since each
+one is a single line —
+
+```bash
+docker compose exec backend python manage.py seed_demo
+```
+
+**Lesson**
+`missing separator` always means the same thing: Make wanted a tab and got
+something else. Check the Make version before trusting a Makefile that uses
+modern syntax — macOS's is frozen at 2006 for licensing reasons, and it is the
+oldest tool most Mac developers use daily without noticing.
+
+The tabs are now invisible and an editor that converts them to spaces on save
+brings the error straight back. An `.editorconfig` with `[Makefile]` /
+`indent_style = tab` pins it down if it ever recurs.
+
+*Support angle:* a tool that fails identically on every command — rather than on
+one specific action — usually means it failed to *load*, not that the action is
+wrong. Worth separating "your input was bad" from "I never started" when writing
+error messages.
+
+---
+
 ## 2026-09-14 — `GOTCHA` — Phase 1 / Slice 3 — A POST chose its own tenant
 
 **Symptom**
