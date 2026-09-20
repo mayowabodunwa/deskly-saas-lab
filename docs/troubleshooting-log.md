@@ -27,6 +27,75 @@ character.
 
 ---
 
+## 2026-09-20 — `ERROR` — Tooling / CI — a token that can push code cannot push workflows
+
+**Symptom**
+Pushing a branch that added `.github/workflows/ci.yml`:
+
+```
+ ! [remote rejected] phase-1-domain -> phase-1-domain (refusing to allow an OAuth App to create or update workflow `.github/workflows/ci.yml` without `workflow` scope)
+error: failed to push some refs to 'https://github.com/mayowabodunwa/deskly-saas-lab.git'
+```
+
+**What it means**
+GitHub treats `.github/workflows/` as a higher privilege than ordinary code. A
+workflow file is not data — it is **code GitHub will execute on its own machines,
+with access to the repository's secrets**. So `repo` scope (push code) and
+`workflow` scope (push things that run) are deliberately separate. A stolen token
+with only `repo` cannot quietly add a workflow that exfiltrates every secret.
+
+Nothing was broken: the commits existed locally and only the push was refused.
+
+**Root cause**
+The stored `gh` token predated the CI work and carried
+`'gist', 'read:org', 'repo'` — no `workflow`.
+
+**Fix**
+Adding the scope hit a second, unrelated problem:
+
+```
+error refreshing credentials for mayusB, received credentials for mayowabodunwa, did you use the correct account in the browser?
+```
+
+The GitHub **username had been renamed** `mayusB` -> `mayowabodunwa`. The token
+was still valid (`gh api user --jq .login` returned `mayowabodunwa`), but `gh`
+had the old name written in its own config, so `gh auth refresh` — which amends
+an existing account entry and therefore insists the names match — refused.
+
+`gh auth login` builds the entry from scratch instead, so it accepts whatever
+the browser says you are:
+
+```bash
+gh auth logout -h github.com -u mayusB
+gh auth login -h github.com -s workflow -w    # HTTPS, yes to git credentials
+```
+
+Scopes afterwards: `'gist', 'read:org', 'repo', 'workflow'`. Push succeeded.
+
+Note `-h github.com` is required whenever the command cannot run interactively;
+without it, `gh` exits with `--hostname required when not running interactively`.
+The device-code flow needs a real terminal, since it waits on a keypress before
+opening the browser.
+
+The same rename also explains the repo path moving from
+`cloudsenseiNG/deskly-saas-lab` to `mayowabodunwa/deskly-saas-lab`. GitHub keeps
+a redirect, so the old remote URL kept working and hid the change — the remote
+was updated with `git remote set-url origin <new url>`.
+
+**Lesson**
+Two separate lessons, and both show up in support queues:
+
+1. **Permission errors are often a *scope* problem, not an access problem.** The
+   same token, same repo, same user — one kind of file was refused. Read which
+   *capability* was named, not just "permission denied".
+2. **An identity rename leaves stale copies everywhere.** GitHub's redirects are
+   a kindness that delays the discovery: git remotes, CLI config and CI configs
+   keep working until one command compares the old name against the new one and
+   stops. "It worked yesterday and nothing changed" usually means something was
+   renamed and something else is still holding the old name.
+
+---
+
 ## 2026-09-20 — `GOTCHA` — Phase 1 / Slice 5 — the unit test stayed green while the API leaked
 
 **Symptom**
