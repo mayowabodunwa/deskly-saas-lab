@@ -1,31 +1,34 @@
 # Deskly — Engineering Notes
 
-Per-phase summaries of what was built, **why** it was built that way, and the
-trade-offs behind each decision. These are a reference as you go and a record of
+Per-phase summaries of what we built, **why** we built it that way, and the
+trade-offs behind each decision. These are a reference for us and a record of
 architectural choices (think lightweight ADRs — Architecture Decision Records).
 
-> **Fork this?** This repo is a reusable boilerplate. It ships a verified
-> Phase 0 and an empty notes framework — start at Phase 1 and fill in a note per
-> phase as you build, copying [`_TEMPLATE.md`](_TEMPLATE.md).
+## How we work
 
-## How this works
-
-- **Concept → build → verify.** Every slice starts with the *why* and ends with
-  a concrete "you'll know it worked when…" check.
+- **Concept → build → verify.** Every slice starts with the *why*, ends with a
+  concrete "you'll know it worked when…" check.
 - **Branch per phase.** `main` always holds verified, working code. Each phase
   is built on its own branch (`phase-1-domain`, `phase-2-auth`, …) and merged
   via a Pull Request after review.
 - **Local-first, free-first.** Everything runs in Docker Compose (Postgres,
   Redis, and later MinIO/MailHog). No cloud spend until the AWS phase.
-- **One note per phase.** When you start a phase, copy `_TEMPLATE.md` to
-  `phase-N-<name>.md` and grow it as you build.
+- **One note per phase.** When you start a phase, copy [`_TEMPLATE.md`](_TEMPLATE.md)
+  to `phase-N-<name>.md` and grow it as you build.
+- **Break it on purpose.** Every phase ends by deliberately breaking what we just
+  built and diagnosing it from the symptoms alone — the way a support ticket
+  actually arrives. That exercise becomes the heart of the phase's article.
 
-## Phase tracker
+## Repository
+
+- GitHub: `cloudsenseiNG/deskly-saas-lab` (private)
+
+## Phase index
 
 | Phase | Notes | Status |
 |-------|-------|--------|
 | 0 — Foundation | [phase-0-foundation.md](phase-0-foundation.md) | ✅ Verified |
-| 1 — Domain model & multi-tenancy | _to write_ | ⬜ Not started |
+| 1 — Domain model & multi-tenancy | [phase-1-domain-multitenancy.md](phase-1-domain-multitenancy.md) | 🚧 In progress |
 | 2 — Auth (sessions + JWT + OAuth + RBAC) | _to write_ | ⬜ Not started |
 | 3 — Admin, impersonation & feature flags | _to write_ | ⬜ Not started |
 | 4 — Async: Celery exports & scheduled email | _to write_ | ⬜ Not started |
@@ -35,3 +38,23 @@ architectural choices (think lightweight ADRs — Architecture Decision Records)
 | 8 — Containers & Kubernetes | _to write_ | ⬜ Not started |
 
 The full curriculum lives in `.claude/skills/saas-lab/`.
+
+## Working documents
+
+Written *during* the build, these are the raw material the course articles are
+compiled from.
+
+| Document | What it holds |
+|---|---|
+| [adr/](adr/) | Architecture Decision Records — one significant decision per file, immutable |
+| [known-gaps.md](known-gaps.md) | Risk register: every lab shortcut vs. what production does, and when it must be closed |
+| [troubleshooting-log.md](troubleshooting-log.md) | Append-only log of real errors, gotchas and dead ends. Errors quoted verbatim |
+| [concepts/](concepts/) | Plain-English system-design notes, one per concept |
+| [django-orm-to-sql.md](django-orm-to-sql.md) | Translation table: every Django ORM call and the SQL it becomes, with Deskly examples |
+
+## Published course
+
+`../content/course/` holds the public-facing articles — one per phase, each
+framed around a realistic support ticket with a break-it/fix-it exercise.
+Articles are compiled at the **end** of each phase and stay `draft: true` until
+reviewed. See [the course outline](../content/course/README.md).

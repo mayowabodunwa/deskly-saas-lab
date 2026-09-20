@@ -5,7 +5,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-deskly}
       POSTGRES_USER: ${POSTGRES_USER:-deskly}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-deskly}
-    ports: ["5432:5432"]
+    ports: ["5433:5432"]
     volumes: ["pgdata:/var/lib/postgresql/data"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-deskly}"]

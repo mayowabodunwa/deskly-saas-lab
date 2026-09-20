@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v4
+
+      - name: Create .env from the example
+        run: cp .env.example .env
+
+      - name: Build the backend image
+        run: docker compose build backend
+
+      - name: Run the test suite
+        run: docker compose run --rm -T backend python manage.py test

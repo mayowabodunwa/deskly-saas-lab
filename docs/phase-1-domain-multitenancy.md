@@ -1,0 +1,548 @@
+# Phase 1 — Domain Model & Multi-Tenancy
+
+**Status:** 🚧 In progress
+
+**Goal:** model Deskly's core objects and enforce **tenant isolation** — an org
+can only ever see its own data. This is what turns "a web app" into "a SaaS."
+
+**Done when:** we can create two organizations, add tickets to each, and a
+request scoped to Org A can never read Org B's tickets — proven by a test.
+
+## Key concepts
+
+- **Tenant** — one customer company using Deskly (e.g. "Acme Corp"). Analogy:
+  an apartment building — shared plumbing (one app + DB), private units
+  (isolated data).
+- **Multi-tenancy** — many tenants share one running app and one database, but
+  none can see another's data.
+- **Migration** — a versioned, replayable description of a schema change. We
+  never edit the DB by hand; migrations keep every environment in sync.
+
+## Architecture decisions & trade-offs
+
+### Isolation strategy: shared DB + shared schema + tenant column
+
+| Strategy | Isolation | Cost | Chosen? |
+|---|---|---|---|
+| **Tenant column** (`organization_id` on every row) | Good (with discipline) | Cheapest, scales far | ✅ |
+| Schema-per-tenant | Stronger | More ops overhead | |
+| Database-per-tenant | Strongest | Most expensive | |
+
+We use the **tenant column**: every tenant-scoped row carries an
+`organization` foreign key; every query filters by it. It's what most SaaS
+companies run (Slack, GitHub, Shopify started here). Its one weakness — a
+*forgotten* filter leaks data — so the whole strategy is about **centralizing
+the filter** so no one can forget it.
+
+### Separate `organizations` app from domain apps
+
+Tenant-defining models (`Organization`, `Membership`) live in their own app,
+apart from domain models (`Ticket`, `Comment`). Tenancy is infrastructure every
+other app depends on, so it sits at the bottom of the dependency graph — avoids
+circular imports and keeps the boundary clear.
+
+### Model choices
+
+- **Route by `slug`, not numeric id** — human-readable URLs and doesn't leak
+  customer count (sequential ids do). Cost: slugs must stay immutable once set.
+- **`Membership` is an explicit join table** (not a plain M2M) because it
+  carries the **role** on the relationship — a user can be Owner at one org and
+  Viewer at another.
+- **Roles as string `TextChoices`** — simplest for a fixed small set. Graduate
+  to a Role table when roles become customer-customizable (the Phase 2 RBAC
+  path).
+- **Enforce invariants in the DB** — a `UniqueConstraint(organization, user)`
+  prevents duplicate memberships even if application code has a bug/race.
+
+### Slice 2 model choices
+
+- **`Comment` carries its own `organization`**, even though it could reach one
+  through `ticket`. The rule is then uniform — *every* tenant-scoped table has
+  the column — so a reviewer can check it mechanically, with no per-model
+  exceptions, and comments can be filtered and indexed without a join. The cost
+  is that the two could theoretically disagree (a comment stamped Org B
+  pointing at Org A's ticket); nothing in the schema prevents that, so it is
+  covered by test instead (see GAP note below).
+- **`on_delete` is a business decision, not a technical one.** The same file
+  answers it three different ways, each by asking what the business wants:
+  `organization` → `CASCADE` (a customer leaves, their data goes — that is what
+  "delete my data" means legally); `created_by` / `assignee` → `SET_NULL` (an
+  employee leaves, the org keeps its support history; `CASCADE` here would be a
+  data-loss incident triggered by an HR action); Slice 1's `Membership.user` →
+  `CASCADE` (a membership without a user is meaningless).
+- **`for_org` lives on a `QuerySet`, not a `Manager`,** so it chains:
+  `Ticket.objects.for_org(org).filter(status="open")` works, and so does
+  `.count()` after it. On a `Manager` it would work once and then dead-end —
+  and a safety rail people cannot use in the middle of a query is a safety rail
+  people route around.
+- **No `created_by` yet.** There are no logins until Phase 2, so there is
+  nothing to put in the field. Added when it can be filled in.
+
+### Slice 3 — how a URL becomes a response
+
+The mental model for the whole request path. **A view is simply the function a
+URL is configured to call, and whatever it returns is what the caller receives.**
+Nothing more mystical than that.
+
+```
+  curl /api/orgs/acme/tickets/
+            │
+            ▼
+  config/urls.py                    the routing table — "which function handles this?"
+    path("api/orgs/", include("apps.organizations.urls"))
+            │  strips "api/orgs/", passes "acme/tickets/" onward
+            ▼
+  apps/organizations/urls.py
+    path("<slug:slug>/", views.organization_detail)   ← tried first, needs the URL to END here
+    path("<slug:slug>/", include("apps.tickets.urls"))  ← "acme/" captured as slug=acme
+            │  strips "acme/", passes "tickets/" onward
+            ▼
+  apps/tickets/urls.py
+    path("tickets/", views.ticket_list)
+            │
+            ▼
+  apps/tickets/views.py
+    def ticket_list(request, slug):        ← slug="acme", handed down from the outer pattern
+        organization = get_object_or_404(Organization, slug=slug)   1. RESOLVE the tenant
+        tickets = Ticket.objects.for_org(organization)              2. SCOPE the query
+        return Response(TicketSerializer(tickets, many=True).data)  3. TRANSLATE to JSON
+            │
+            ▼
+  HTTP/1.1 200 OK + JSON body
+```
+
+**Four things that model explains:**
+
+- **`urls.py` is a lookup table, matched top to bottom, first match wins.** Two
+  patterns can share a prefix: `<slug:slug>/` matches `/api/orgs/acme/` only
+  when the URL *ends* there, so `/api/orgs/acme/tickets/` falls through to the
+  `include` on the next line. Order is significant.
+- **`<slug:slug>` is two different words.** The first is the *type* of value
+  allowed (letters, digits, hyphens, underscores — never a `/`); the second is
+  the *name* it arrives under in the view. They coincide here by choice.
+  Captured values propagate through nested `include()`s, which is why
+  `ticket_list` receives `slug` without asking for it.
+- **A view returns a response; the return value *is* the API.** `Response({...})`
+  builds JSON by hand — fine for a few fields. A **serializer** describes the
+  translation once and handles both directions (row → JSON out, JSON → validated
+  data in). `many=True` means "a list of these".
+- **The routing table is built once at startup, not per request.** So a mistake
+  in `urls.py` or `settings.py` prevents the process from booting at all.
+
+**Order inside the view is the safety property.** Resolve first, scope second.
+`for_org()` can never run without an organization to scope to, because the line
+above it either produced one or ended the request with a 404.
+
+### Slice 3 — status codes are part of the design
+
+| Code | Meaning here | Why it was chosen |
+|---|---|---|
+| `200 OK` | found and returned | |
+| `201 Created` | a POST made something new | distinct from 200 so the caller knows a resource now exists |
+| `301 Moved Permanently` | trailing slash added | Django's `APPEND_SLASH`. Redirects are GET-only — a slash-less `POST` loses its body, a classic silent "the form submits but nothing saves" |
+| `400 Bad Request` | serializer validation failed | the caller's input is wrong; nothing on the server is broken |
+| `404 Not Found` | no such slug — **and, later, "not yours"** | see below |
+| `500` | the server itself failed | should never be the answer to a bad URL |
+
+**404 over 403 for another tenant's data.** `403 Forbidden` confirms the thing
+exists. If a foreign org returns 403 while a nonsense slug returns 404, the
+difference between the two answers enumerates the customer list — try `tesla`,
+`stripe`, `monzo`, and the status code tells you who is a customer. Returning
+404 for both reveals nothing. The rule: **never confirm the existence of
+something the caller has no right to know about.**
+
+`get_object_or_404` exists for exactly this. `Organization.objects.get()` raises
+`DoesNotExist` → an unhandled 500, which claims the server broke when in fact
+someone simply typed a bad URL. Wrong status codes send whoever is on call to
+look in the wrong place.
+
+*(Production nicety not yet applied: DRF's default 404 body,
+`"No Organization matches the given query."`, names the model. Real deployments
+flatten it to `"Not found."`)*
+
+### Slice 3 — resolution is not authorization
+
+Resolving the tenant from the URL answers *which* org the request concerns. It
+does **not** answer whether the caller is entitled to it. With no authentication
+until Phase 2, any caller can substitute any slug:
+
+```
+curl -i http://localhost:8000/api/orgs/globex/   →   200 OK, Globex's record
+```
+
+The app behaved correctly and still handed over another tenant's data, because
+the URL was treated as both the question and the permission. Tracked as
+**GAP-006 (🔴)**; closes in Phase 2, where the resolved org is checked against
+the caller's `Membership`. Note that `for_org()` is no defence here — the filter
+is applied perfectly, to the wrong org. The query was right; the question wasn't.
+
+### Slice 4 — one command that rebuilds the demo data
+
+Up to here every Organization and Ticket in the database was typed by hand in
+`manage.py shell`. That data exists only on this laptop. Nobody else cloning the
+repo gets it, and the isolation test in Slice 5 cannot rely on rows a human
+happened to type once.
+
+`seed_demo` fixes that: **one command that puts the database into a known state.**
+
+```bash
+docker compose exec backend python manage.py seed_demo
+```
+
+**What a management command is.** A plain Python file that Django runs *with the
+whole project already loaded* — settings read, database connected, models
+importable. That is the difference between it and a loose script: a loose script
+would have to set all of that up itself.
+
+Django finds it by location, not by registration. Any installed app may contain
+a `management/commands/` folder, and every `.py` file inside becomes a command
+named after the file:
+
+```
+backend/apps/core/management/__init__.py            <- empty, but required
+backend/apps/core/management/commands/__init__.py   <- empty, but required
+backend/apps/core/management/commands/seed_demo.py  -> manage.py seed_demo
+```
+
+The two empty `__init__.py` files are not decoration. Django imports these as
+Python packages, and a folder without `__init__.py` is not one it will search —
+so a missing empty file produces `Unknown command: 'seed_demo'` with no hint as
+to why.
+
+**Why it lives in `core`.** The command touches two apps: `organizations` and
+`tickets`. Putting it in either one makes that app depend on the other for no
+real reason. `core` is the app that belongs to no single part of the domain —
+the right home for something that spans the whole project.
+
+**Why a command, and not one of the alternatives:**
+
+| Approach | Why not |
+|---|---|
+| Typing it in `manage.py shell` | Not repeatable, and leaves no record in git. What is in the database becomes an undocumented fact about one machine. |
+| A **data migration** | Migrations run **once per environment, forever, including production**. Demo tickets would ship to real customers. Migrations are for schema and for data every environment genuinely needs. |
+| A **fixture** (`loaddata` on a JSON file) | Declarative and no code, but it pins primary keys, has nowhere to put logic, and overwrites by id. Fine for static lookup tables; poor for data meant to be rebuilt. |
+| A management command | Plain Python, version-controlled, can be made idempotent, and can be called from tests and from `make`. |
+
+**Idempotent** is the property that matters, and it is the one the first version
+failed. It means: *running it twice leaves the database exactly as running it
+once did.* The first draft used `Organization.objects.create(...)` and
+`Ticket.objects.create(...)`, and a second run raised `IntegrityError` on the
+organizations while silently tripling the tickets — three rows became nine. Full
+write-up in `docs/troubleshooting-log.md` (2026-09-20, `GOTCHA`).
+
+The fix is `get_or_create`, which forces a decision that `create` never asks
+about — **which fields identify this row, and which are just its contents:**
+
+```python
+Ticket.objects.get_or_create(
+    organization=acme,               # identity: how to recognise the row
+    subject="Printer won't work",    # identity
+    defaults={"body": "..."},        # cargo: only written when creating
+)
+```
+
+Plain arguments are the search. `defaults` is applied **only** on creation and
+never updates an existing row. Putting `body` in the search instead would have
+meant that editing one sentence of seed text created a fourth ticket rather than
+matching the third.
+
+`organization` belongs in the lookup for the same reason it belongs everywhere
+else in this phase: two tenants may each legitimately have a ticket called
+"Password reset". In a multi-tenant system, *"is this the same row?"* almost
+always means *"the same row **within this org**"*.
+
+**All-or-nothing.** Django does **not** wrap a management command in a database
+transaction by default, so the first version kept whatever it had already
+written when it failed partway — a state that is neither "before" nor "after".
+`handle()` is therefore decorated with `@transaction.atomic`: every write is held
+open until the function returns, and an exception throws all of them away. A
+successful run looks identical either way, which is why this is easy to leave
+out and easy to believe is working. Was **GAP-009**, closed 2026-09-20.
+
+### Slice 5 — the test that holds the line
+
+Everything built in Slices 1-4 is a **convention**. `for_org()` exists, but
+`Ticket.objects.all()` is still there, still works, and is still the shorter
+thing to type — and it is what every Django tutorial teaches first. A convention
+protects you until the day somebody is in a hurry. A test is the part that says
+no on your behalf, at 4pm on a Friday, to a developer who has never read this
+document.
+
+Three tests now live in `backend/apps/tickets/tests.py`, all in one
+`TenantIsolationTests` class:
+
+| Test | Question it answers |
+|---|---|
+| `test_for_org_returns_only_that_orgs_tickets` | Does the **tool** work? |
+| `test_ticket_list_endpoint_is_scoped_to_the_url_org` | Does the **page** use the tool? |
+| `test_posting_with_another_orgs_id_still_lands_in_the_url_org` | Can a hostile **write** plant a row in another tenant? |
+
+**A test that has only ever passed proves nothing.** The first run was green
+immediately, which is exactly the state in which a broken test and a working one
+are indistinguishable. So each test was deliberately made to fail before being
+trusted:
+
+- Swapping `for_org(acme)` for `Ticket.objects.all()` in the **test** produced
+  `['Globex merger plans', "Printer won't work"]` — the leak itself, in one line,
+  with another tenant's confidential subject at the top of Acme's list.
+- Swapping the same call in **`views.py`** — a file the tests never mention —
+  produced `.F`: test 1 **passed** while the API leaked. That dot is the reason
+  the HTTP test exists. Testing `for_org` proves the lock works; only a request
+  through the real URL proves the door is locked.
+
+**Why the HTTP test goes through `self.client`.** Django's test client sends a
+genuine request through routing, view and serializer with no server running and
+no network. It exercises the path a customer's browser takes, which a direct
+call to the view function would not.
+
+**Why the POST test checks the database, not the response.** The response is the
+serializer echoing back what it saved, so it looks correct either way. The only
+trustworthy question is which org owns the row that now exists, which means
+re-fetching it with `Ticket.objects.get(...)`.
+
+**Why the POST test expects `201`, not a rejection.** The hostile
+`"organization": <other id>` field is *ignored*, not refused. Two independent
+guards produce that outcome: `TicketSerializer.Meta.fields` omits
+`organization`, so the value never survives deserialization; and the view calls
+`serializer.save(organization=organization)` with the org resolved from the URL,
+overriding anything a client could supply. Either alone is sufficient — which
+also means the test cannot currently tell you which one is holding. Rejecting
+the request with a `400` instead would be a defensible alternative design, and
+noisier in the logs, at the cost of breaking clients that harmlessly echo back
+fields they were given.
+
+**What these tests deliberately do *not* cover:**
+
+- **Authorization (GAP-006).** Every test here calls Acme's URL and checks Acme's
+  data comes back. Nothing checks that *the caller is entitled to Acme*, because
+  there are no logins until Phase 2. The endpoint answers to anyone.
+- **`organizations/tests.py` is still empty, on purpose.** A test for
+  `organization_detail` today would have to assert `200 OK` for any caller —
+  pinning GAP-006 in place and making it read as intentional. Phase 2 writes
+  that test asserting `403`, and it going green is how GAP-006 closes.
+- **Comment org drift (GAP-007).** Still open.
+
+**Tests never run against live code.** `manage.py test` creates a separate
+`test_deskly` database, runs, and destroys it — the seeded Acme and Globex rows
+are never touched. Tests answer *"would this break?"* before a deploy; health
+checks like `/api/health/` answer *"is it broken now?"* continuously, after one.
+Both matter, and a leak is firmly a question for the first kind: once it is live,
+the damage is already done and no health check will report it.
+
+## Build slices
+
+- [x] Slice 1 — `organizations` app: `Organization` + `Membership` models,
+      registered in `INSTALLED_APPS`. **Verified 2026-09-07** — table shape
+      confirmed in psql; duplicate `slug` and duplicate `(organization, user)`
+      both rejected by Postgres with `IntegrityError`.
+- [x] Slice 2 — `tickets` app: `Ticket` + `Comment` with a `for_org` scoping
+      manager; migrate; inspect tables. **Verified 2026-09-10** — tables
+      created and inspected in psql; the cross-tenant leak reproduced
+      deliberately in the Django shell, then closed with `for_org`.
+- [x] Slice 3 — tenant resolution (per-request org) + guard writes
+      (never trust client-supplied `organization_id`). **Verified 2026-09-14** —
+      `/api/orgs/<slug>/tickets/` returns only that org's tickets; a POST to
+      Acme's URL carrying `"organization": 3` still lands in Acme. The
+      vulnerable variant was built deliberately, shown to leak into Globex, then
+      reverted and the planted rows deleted by id. Authorization is **not** done
+      — GAP-006 stays open until Phase 2.
+- [x] Slice 4 — `seed_demo` management command (two orgs with sample tickets).
+      **Verified 2026-09-20** — `manage.py seed_demo` run twice from an empty
+      tickets table left exactly 3 tickets across 2 orgs, every row carrying the
+      *first* run's `created_at`. The break step came for free: the naive
+      `create()` version was written first, raised `IntegrityError` on the
+      organizations and silently grew the tickets to 9, and was diagnosed from
+      `created_at` clustering before being fixed with `get_or_create`. Wired up
+      as `make seed`.
+- [x] Slice 5 — isolation test proving Org A can't read Org B's data.
+      **Verified 2026-09-20** — 3 tests in `apps/tickets/tests.py`, covering the
+      manager, the read endpoint and a hostile write. Each was made to fail
+      deliberately before being trusted; breaking `views.py` alone turned the
+      suite `.F`, proving the HTTP test catches what the model test cannot.
+      Authorization is still out of scope until Phase 2 (GAP-006).
+
+## How to verify (target)
+
+- Seed creates Org A and Org B.
+- A member of Org A lists only A's tickets; requesting Org B's slug is denied
+  (404/403, not an empty list).
+- Posting a ticket with `organization_id` set to B's id still lands in A.
+- A test asserts the isolation so it can never silently regress.
+
+## Commands used
+
+```bash
+# create the app (bind mount means files appear on the host immediately)
+docker compose exec backend mkdir -p apps/organizations
+docker compose exec backend python manage.py startapp organizations apps/organizations
+
+# schema changes: write the file, then apply it
+docker compose exec backend python manage.py makemigrations organizations
+docker compose exec backend python manage.py migrate
+
+# inspect the real table, not Django's idea of it
+docker compose exec db psql -U deskly -d deskly -c "\d organizations_membership"
+```
+
+Slice 2 followed the same shape:
+
+```bash
+docker compose exec backend mkdir -p apps/tickets
+docker compose exec backend python manage.py startapp tickets apps/tickets
+# add "apps.tickets" to INSTALLED_APPS, then:
+docker compose exec backend python manage.py makemigrations tickets
+docker compose exec backend python manage.py migrate
+docker compose exec db psql -U deskly -d deskly -c "\d tickets_ticket"
+```
+
+Reproducing the leak, in `manage.py shell`:
+
+```python
+from apps.organizations.models import Organization
+from apps.tickets.models import Ticket
+acme = Organization.objects.get(slug="acme")
+globex = Organization.objects.get(slug="globex")
+Ticket.objects.create(organization=acme, subject="Printer won't work")
+Ticket.objects.create(organization=globex, subject="Globex merger plans")
+
+# what the buggy page does — returns BOTH companies' tickets
+list(Ticket.objects.values_list("organization__slug", "subject"))
+
+# what it should do
+list(Ticket.objects.for_org(acme).values_list("organization__slug", "subject"))
+```
+
+```bash
+# Slice 3 — tenant resolution over HTTP
+docker compose up -d db backend
+
+# resolve an org from the URL
+curl -i http://localhost:8000/api/orgs/acme/
+
+# status codes worth seeing side by side
+curl -i http://localhost:8000/api/orgs/globex/         # 200 — and see GAP-006
+curl -i http://localhost:8000/api/orgs/nosuchcompany/  # 404
+curl -i http://localhost:8000/api/orgs/acme            # 301 -> /api/orgs/acme/
+
+# tenant-scoped ticket lists
+curl http://localhost:8000/api/orgs/acme/tickets/      # 2 tickets
+curl http://localhost:8000/api/orgs/globex/tickets/    # 1 ticket
+
+# when the server goes silent, read its last words
+docker compose logs --tail=40 backend
+```
+
+```bash
+# Slice 4 — seed the demo data
+docker compose exec backend python manage.py seed_demo
+make seed                                    # same thing, shorter
+
+# is it idempotent? run it twice and count
+docker compose exec db psql -U deskly -d deskly -c \
+  "SELECT (SELECT count(*) FROM organizations_organization) AS orgs,
+          (SELECT count(*) FROM tickets_ticket) AS tickets;"
+
+# which rows came from which run — milliseconds tell program from human
+docker compose exec db psql -U deskly -d deskly -c \
+  "SELECT created_at, organization_id, subject FROM tickets_ticket ORDER BY created_at;"
+
+# start from a clean slate before re-testing the seed
+docker compose exec backend python manage.py shell -c \
+  "from apps.tickets.models import Ticket; Ticket.objects.all().delete()"
+
+# check every make target parses, without running any of them
+for t in up down logs migrate sh test seed; do make -n "$t"; done
+```
+
+```bash
+# Slice 5 — the test suite
+make test                                  # docker compose exec backend python manage.py test
+docker compose exec backend python manage.py test apps.tickets                  # one app
+docker compose exec backend python manage.py test apps.tickets.tests.TenantIsolationTests  # one class
+
+# prove a test can fail before trusting it (edit, run, revert):
+#   tests.py  line 16 : for_org(self.acme) -> .all()        expect F, the leak
+#   views.py  line 25 : for_org(organization) -> .all()     expect .F, API leaks
+```
+
+## Gotchas
+
+- **`curl: (52) Empty reply from server`** → the server is *dead*, not unhappy.
+  A 404 or 500 means the process is alive and answering; silence means it never
+  finished booting. `urls.py` and `settings.py` are imported once at startup to
+  build the routing table, so an error there stops the process before it can
+  serve anything — including an error page. Only the container logs hold the
+  reason: `docker compose logs --tail=40 backend`. First move on silence is
+  always the logs, never another curl.
+- **Read a traceback from the bottom.** The last line is the error
+  (`NameError: name 'include' is not defined`); the lowest line naming a file
+  under `/app/` is where it happened. Everything between is framework
+  scaffolding. Real instance: adding `include(...)` to
+  `organizations/urls.py` without adding it to
+  `from django.urls import path` — one missing word took the whole server down.
+- **A redirect drops a POST body.** `APPEND_SLASH` turns `/api/orgs/acme` into a
+  301 to `/api/orgs/acme/`. Harmless for GET, silent data loss for POST. Always
+  write the trailing slash.
+- Empty list where data should be → the org didn't resolve; base queryset
+  correctly failed closed. Check the tenant-resolution layer.
+- **Cross-tenant leak in a new endpoint** → someone used `Ticket.objects.all()`
+  directly instead of `for_org`. Reproduced deliberately in Slice 2. Three
+  things make this the access-control failure that actually reaches production:
+  the dangerous call is the *shorter, more natural* one that every Django
+  tutorial teaches first; it raises no error, because the code does exactly
+  what it says — it just answers a different question than intended; and with
+  one tenant in a dev database the safe and unsafe queries return identical
+  results, so it stays invisible until a second customer exists. Adding
+  `for_org` does **not** remove `.objects.all()` — the dangerous path is still
+  there. That is why the mitigation is a test (Slice 5), not a convention.
+- **N+1 queries on reverse relations.** `[m.organization.name for m in
+  user.memberships.all()]` costs 1 query for the memberships plus 1 *per row*
+  to fetch each organization. Invisible with test data, fatal at scale — the
+  cause of "slow for one customer only" tickets. Fix: `select_related` for
+  forward (one) relations, `prefetch_related` for reverse (many) relations.
+  Measure with `reset_queries()` + `len(connection.queries)` (needs `DEBUG=1`).
+- **Id sequences have gaps.** A failed insert still consumes its id — Postgres
+  allocates the number before checking constraints, and does not give it back.
+  Acme is id 1 and Globex id 3 because a rejected duplicate ate id 2. Never
+  read "highest id" as "row count", and never expose ids as a customer count —
+  a second argument for routing by `slug` (see ADR-0002).
+- **Django auto-indexes every foreign key.** You will see indexes in `\d` that
+  you never declared. Useful, but not free: each index slows writes slightly
+  and costs disk.
+- **A seed command must be idempotent from day one.** It gets run dozens of
+  times. `create()` inserts unconditionally; `get_or_create()` reconciles. The
+  loud half of that failure (`IntegrityError` on a unique `slug`) is the *good*
+  outcome — `Ticket` had no unique constraint, so it duplicated in silence.
+  A unique constraint is what converts silent duplication into a loud error.
+- **`defaults` never updates an existing row.** Edit the seed text, re-run, and
+  existing rows keep the old value — `get_or_create` only applies `defaults`
+  when it creates. `update_or_create` is the one that overwrites. Expect
+  "I changed the seed file and nothing changed" at least once.
+- **Empty `__init__.py` files are load-bearing.** `management/` and
+  `management/commands/` both need one, or Django never looks inside and the
+  only symptom is `Unknown command: 'seed_demo'`.
+- **Recipe lines in a Makefile must start with a literal tab.** macOS ships GNU
+  Make 3.81 (2006), which predates `.RECIPEPREFIX`, so a Makefile using `>`
+  fails everywhere with `Makefile:5: *** missing separator.  Stop.` — including
+  on targets unrelated to what you changed. Verify with `make -n <target>`,
+  which prints the commands without running them.
+- **A green test suite that has never been red is not evidence.** Break every
+  test on purpose once, watch it fail, then revert. A test with a typo'd
+  assertion passes exactly as convincingly as a correct one.
+- **`E` and `F` are different news.** `F` is a failure: the test ran and the
+  check did not hold. `E` is an error: it crashed before checking anything, so
+  *nothing was tested*. On a red suite, read the `E`s first.
+- **`TypeError: BaseManager.all() takes 1 positional argument but 2 were
+  given`** → `all()` takes no org, which is the entire point of it: it means
+  "every row in the table" and has nowhere to put a tenant. The count looks
+  wrong because the invisible first argument is `self`.
+- **Assert the status code before asserting the body.** A wrong URL returns 404
+  with an empty list — which, if you only check the subjects, reads as a
+  passing "no leak" result. A test that passes when the page is missing is worse
+  than no test.
+- **A read-scoping test says nothing about writes.** They are separate guards
+  and need separate tests; the read test stays green while a hostile POST plants
+  rows anywhere it likes.
+- **`Found N test(s)` counts the whole project.** An empty `tests.py` in another
+  app contributes zero silently — "no tests ran for that app" and "that app has
+  no tests" look identical from the outside.
