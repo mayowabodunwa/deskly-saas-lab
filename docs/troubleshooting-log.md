@@ -27,6 +27,77 @@ character.
 
 ---
 
+## 2026-09-20 — `GOTCHA` — Phase 1 / Slice 5 — the unit test stayed green while the API leaked
+
+**Symptom**
+`Ticket.objects.for_org(organization)` in `apps/tickets/views.py` was replaced
+with `Ticket.objects.all()` — the cross-tenant leak, reintroduced deliberately.
+The suite reported:
+
+```
+.F
+======================================================================
+FAIL: test_ticket_list_endpoint_is_scoped_to_the_url_org
+AssertionError: Lists differ: ['Globex merger plans', "Printer won't work"] != ["Printer won't work"]
+```
+
+One dot, one F. The model-level isolation test **passed** while the live
+endpoint was handing Acme a list with Globex's confidential subject at the top.
+
+**What it means**
+The two tests answer different questions, and only one of them is the question a
+customer is standing in front of:
+
+- `test_for_org_returns_only_that_orgs_tickets` asks *does the tool work?* —
+  `for_org` filters correctly. Still true. Nobody was calling it.
+- `test_ticket_list_endpoint_is_scoped_to_the_url_org` asks *does the page use
+  the tool?*
+
+Testing the lock is not testing the door.
+
+**Root cause**
+Nothing was broken in the code under test by the first test — the breakage was
+in a file the tests never mention. A unit test pinned down a helper; the route
+from URL to response was free to stop calling that helper at any time, silently.
+
+**Fix**
+No fix needed to the app — the line was reverted. The finding is that the HTTP
+test earns its place: it is the only one of the two that fails when the endpoint
+regresses. Both were kept, because they fail in usefully different ways.
+
+Along the way, two mistakes while trying to make the test fail, both instructive:
+
+1. Changing `for_org(self.acme)` to `for_org(self.globex)` produced a red test
+   that proved the *opposite* of the intent — the returned list was
+   `['Globex merger plans']`, i.e. exactly one row, correctly scoped. A test can
+   go red because the code is wrong or because the expectation is wrong, and the
+   output looks identical.
+2. Changing the call to `Ticket.objects.all(self.acme)` produced an **error**,
+   not a failure:
+
+```
+TypeError: BaseManager.all() takes 1 positional argument but 2 were given
+```
+
+   `all()` has nowhere to put a tenant — that is what it means. The argument
+   count reads as off-by-one because the invisible first argument is `self`.
+   `E` means the test crashed before checking anything, so nothing was tested;
+   `F` means it ran and the check did not hold. On a red suite, read the `E`s
+   first.
+
+**Lesson**
+Write the test, then **break the thing it guards** — not the test itself — and
+confirm it goes red. A green suite that has never been red is indistinguishable
+from a suite of typos. And for anything multi-tenant, the test that matters
+travels the full path a real request takes; a helper-level test will keep
+reassuring you while the endpoint leaks.
+
+*Support angle:* "I can see another company's data" never arrives as an
+exception in a log. There is no crash, no 500, no alert — the code does exactly
+what it says. It arrives as a customer email, weeks late.
+
+---
+
 ## 2026-09-20 — `GOTCHA` — Phase 1 / Slice 3 — `seed_demo` turned three tickets into nine
 
 **Symptom**

@@ -84,9 +84,15 @@ quietly follows the project into deployment.
 
 ---
 
-## 🟡 GAP-004 — No automated tests or CI yet
+## 🟠 GAP-004 — Tests exist, but nothing runs them automatically
 
-**Where:** repo-wide. `make test` exists; nothing runs it automatically.
+*Narrowed 2026-09-20 (Phase 1 / Slice 5): the "no tests" half is closed — three
+tenant-isolation tests now live in `backend/apps/tickets/tests.py`. The CI half
+is still open, and the severity went **up**, not down: there is now a control
+worth protecting and still no gate protecting it.*
+
+**Where:** repo-wide. `make test` exists and passes; nothing runs it
+automatically. No linting and no security scan either.
 
 **What production does:** every push runs tests, linting and a security scan
 before merge; failures block the pull request.
@@ -96,8 +102,9 @@ whoever notices. **Phase 1 raises the stakes sharply** — the tenant-isolation
 test is the control that stops a cross-customer data leak, and a test nobody
 runs protects nobody.
 
-**Trigger to close:** end of Phase 1, alongside the isolation test. This is the
-first gap we should actually close.
+**Trigger to close:** now overdue — the isolation test exists, so the only
+missing piece is a GitHub Actions workflow running `make test` on every push and
+blocking the merge on red. Next repo-hygiene task, and before any deploy work.
 
 ---
 

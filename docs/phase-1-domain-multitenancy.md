@@ -259,6 +259,76 @@ open until the function returns, and an exception throws all of them away. A
 successful run looks identical either way, which is why this is easy to leave
 out and easy to believe is working. Was **GAP-009**, closed 2026-09-20.
 
+### Slice 5 — the test that holds the line
+
+Everything built in Slices 1-4 is a **convention**. `for_org()` exists, but
+`Ticket.objects.all()` is still there, still works, and is still the shorter
+thing to type — and it is what every Django tutorial teaches first. A convention
+protects you until the day somebody is in a hurry. A test is the part that says
+no on your behalf, at 4pm on a Friday, to a developer who has never read this
+document.
+
+Three tests now live in `backend/apps/tickets/tests.py`, all in one
+`TenantIsolationTests` class:
+
+| Test | Question it answers |
+|---|---|
+| `test_for_org_returns_only_that_orgs_tickets` | Does the **tool** work? |
+| `test_ticket_list_endpoint_is_scoped_to_the_url_org` | Does the **page** use the tool? |
+| `test_posting_with_another_orgs_id_still_lands_in_the_url_org` | Can a hostile **write** plant a row in another tenant? |
+
+**A test that has only ever passed proves nothing.** The first run was green
+immediately, which is exactly the state in which a broken test and a working one
+are indistinguishable. So each test was deliberately made to fail before being
+trusted:
+
+- Swapping `for_org(acme)` for `Ticket.objects.all()` in the **test** produced
+  `['Globex merger plans', "Printer won't work"]` — the leak itself, in one line,
+  with another tenant's confidential subject at the top of Acme's list.
+- Swapping the same call in **`views.py`** — a file the tests never mention —
+  produced `.F`: test 1 **passed** while the API leaked. That dot is the reason
+  the HTTP test exists. Testing `for_org` proves the lock works; only a request
+  through the real URL proves the door is locked.
+
+**Why the HTTP test goes through `self.client`.** Django's test client sends a
+genuine request through routing, view and serializer with no server running and
+no network. It exercises the path a customer's browser takes, which a direct
+call to the view function would not.
+
+**Why the POST test checks the database, not the response.** The response is the
+serializer echoing back what it saved, so it looks correct either way. The only
+trustworthy question is which org owns the row that now exists, which means
+re-fetching it with `Ticket.objects.get(...)`.
+
+**Why the POST test expects `201`, not a rejection.** The hostile
+`"organization": <other id>` field is *ignored*, not refused. Two independent
+guards produce that outcome: `TicketSerializer.Meta.fields` omits
+`organization`, so the value never survives deserialization; and the view calls
+`serializer.save(organization=organization)` with the org resolved from the URL,
+overriding anything a client could supply. Either alone is sufficient — which
+also means the test cannot currently tell you which one is holding. Rejecting
+the request with a `400` instead would be a defensible alternative design, and
+noisier in the logs, at the cost of breaking clients that harmlessly echo back
+fields they were given.
+
+**What these tests deliberately do *not* cover:**
+
+- **Authorization (GAP-006).** Every test here calls Acme's URL and checks Acme's
+  data comes back. Nothing checks that *the caller is entitled to Acme*, because
+  there are no logins until Phase 2. The endpoint answers to anyone.
+- **`organizations/tests.py` is still empty, on purpose.** A test for
+  `organization_detail` today would have to assert `200 OK` for any caller —
+  pinning GAP-006 in place and making it read as intentional. Phase 2 writes
+  that test asserting `403`, and it going green is how GAP-006 closes.
+- **Comment org drift (GAP-007).** Still open.
+
+**Tests never run against live code.** `manage.py test` creates a separate
+`test_deskly` database, runs, and destroys it — the seeded Acme and Globex rows
+are never touched. Tests answer *"would this break?"* before a deploy; health
+checks like `/api/health/` answer *"is it broken now?"* continuously, after one.
+Both matter, and a leak is firmly a question for the first kind: once it is live,
+the damage is already done and no health check will report it.
+
 ## Build slices
 
 - [x] Slice 1 — `organizations` app: `Organization` + `Membership` models,
@@ -284,7 +354,12 @@ out and easy to believe is working. Was **GAP-009**, closed 2026-09-20.
       organizations and silently grew the tickets to 9, and was diagnosed from
       `created_at` clustering before being fixed with `get_or_create`. Wired up
       as `make seed`.
-- [ ] Slice 5 — isolation test proving Org A can't read Org B's data.
+- [x] Slice 5 — isolation test proving Org A can't read Org B's data.
+      **Verified 2026-09-20** — 3 tests in `apps/tickets/tests.py`, covering the
+      manager, the read endpoint and a hostile write. Each was made to fail
+      deliberately before being trusted; breaking `views.py` alone turned the
+      suite `.F`, proving the HTTP test catches what the model test cannot.
+      Authorization is still out of scope until Phase 2 (GAP-006).
 
 ## How to verify (target)
 
@@ -379,6 +454,17 @@ docker compose exec backend python manage.py shell -c \
 for t in up down logs migrate sh test seed; do make -n "$t"; done
 ```
 
+```bash
+# Slice 5 — the test suite
+make test                                  # docker compose exec backend python manage.py test
+docker compose exec backend python manage.py test apps.tickets                  # one app
+docker compose exec backend python manage.py test apps.tickets.tests.TenantIsolationTests  # one class
+
+# prove a test can fail before trusting it (edit, run, revert):
+#   tests.py  line 16 : for_org(self.acme) -> .all()        expect F, the leak
+#   views.py  line 25 : for_org(organization) -> .all()     expect .F, API leaks
+```
+
 ## Gotchas
 
 - **`curl: (52) Empty reply from server`** → the server is *dead*, not unhappy.
@@ -440,3 +526,23 @@ for t in up down logs migrate sh test seed; do make -n "$t"; done
   fails everywhere with `Makefile:5: *** missing separator.  Stop.` — including
   on targets unrelated to what you changed. Verify with `make -n <target>`,
   which prints the commands without running them.
+- **A green test suite that has never been red is not evidence.** Break every
+  test on purpose once, watch it fail, then revert. A test with a typo'd
+  assertion passes exactly as convincingly as a correct one.
+- **`E` and `F` are different news.** `F` is a failure: the test ran and the
+  check did not hold. `E` is an error: it crashed before checking anything, so
+  *nothing was tested*. On a red suite, read the `E`s first.
+- **`TypeError: BaseManager.all() takes 1 positional argument but 2 were
+  given`** → `all()` takes no org, which is the entire point of it: it means
+  "every row in the table" and has nowhere to put a tenant. The count looks
+  wrong because the invisible first argument is `self`.
+- **Assert the status code before asserting the body.** A wrong URL returns 404
+  with an empty list — which, if you only check the subjects, reads as a
+  passing "no leak" result. A test that passes when the page is missing is worse
+  than no test.
+- **A read-scoping test says nothing about writes.** They are separate guards
+  and need separate tests; the read test stays green while a hostile POST plants
+  rows anywhere it likes.
+- **`Found N test(s)` counts the whole project.** An empty `tests.py` in another
+  app contributes zero silently — "no tests ran for that app" and "that app has
+  no tests" look identical from the outside.
