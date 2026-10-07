@@ -64,6 +64,16 @@ Write links the way that works on GitHub. A small plugin
 - `../../docs/...` becomes the file on GitHub. **The repo is private for now**,
   so those links only work for its owner.
 
+## If a page suddenly says "not found"
+
+Switching git branches can briefly delete lesson files. The running site sees
+them disappear but doesn't always notice them come back, and then logs
+`The collection "course" does not exist or is empty`. Restart it:
+
+```bash
+docker compose --profile site restart site
+```
+
 ## Not done yet
 
 - **Hosting.** Nothing is deployed. The site builds to plain files in `dist/`,
