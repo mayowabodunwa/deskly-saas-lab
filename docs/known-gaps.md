@@ -84,7 +84,40 @@ quietly follows the project into deployment.
 
 ---
 
-## 🟠 GAP-004 — Tests exist, but nothing runs them automatically
+## ✅ GAP-004 (closed 2026-10-07) — Tests existed, but nothing ran them automatically
+
+**Closed by:** two pieces, three weeks apart.
+
+1. `.github/workflows/ci.yml` (2026-09-20, `6c08e74`) runs `manage.py test` in
+   Docker on every pull request and every push to `main`.
+2. Branch protection on `main` (2026-10-07), set by the repo owner in
+   Settings → Branches:
+   - **Required status check: `test`**, tied to GitHub Actions, so nothing else
+     can satisfy it.
+   - **Strict**: the branch must be up to date with `main`, so tests re-run
+     against what will actually be merged.
+   - **Required approvals: 0.** A solo maintainer cannot approve their own PR,
+     so 1 required review would have blocked every merge. On a team, turn this
+     back on.
+
+**Evidence:** `gh api repos/mayowabodunwa/deskly-saas-lab/branches/main/protection`
+shows `"contexts":["test"]`, `"strict":true` and `required_approving_review_count: 0`.
+PR #1 reports `mergeStateStatus: CLEAN` with `test` = `SUCCESS`.
+
+The first attempt had "require status checks" ticked with **no check selected**
+(`"contexts":[]`). It looked protected and blocked nothing. Always read back the
+setting, not the checkbox.
+
+**Not proven:** a red PR being refused. The block is taken on the API's word
+until the first real failing PR shows it.
+
+**Still open, on purpose:** `enforce_admins` is `false`, so the repo owner can
+still bypass the rule. That's acceptable for a solo lab, but not for a team.
+Linting and security scanning were part of this entry's "what production does"
+and are not done. They are tracked as GAP-011.
+
+The original entry is kept below, unedited.
+
 
 *Narrowed 2026-09-20 (Phase 1 / Slice 5): the "no tests" half is closed — three
 tenant-isolation tests now live in `backend/apps/tickets/tests.py`. The CI half
@@ -339,6 +372,25 @@ symptom is a customer reporting a reply they didn't write.
 **Trigger to close:** before any code calls `update()` or `bulk_create()` on
 comments, or any data-fix script touches `tickets_comment`. Also close it before
 the first real tenant.
+
+---
+
+## 🟡 GAP-011 — CI runs tests only: no linting, no security scan
+
+**Where:** `.github/workflows/ci.yml`
+
+CI runs the test suite and nothing else. Split out of GAP-004 when that closed.
+
+**What production does:** the same pipeline also runs a linter/formatter check
+(e.g. `ruff`), a dependency vulnerability scan (e.g. `pip-audit`, Dependabot),
+and often a static security scan (e.g. `bandit`, CodeQL). All of them gate the
+merge like the tests do.
+
+**Why it matters:** tests prove the code does what you checked. They don't catch
+a known-vulnerable package version, or the kind of bug a linter flags for free.
+
+**Trigger to close:** before the first deploy anywhere public (Phase 7), and
+sooner if a dependency is added outside Django/DRF.
 
 ---
 
