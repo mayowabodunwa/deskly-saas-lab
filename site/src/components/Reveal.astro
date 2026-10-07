@@ -1,0 +1,13 @@
+---
+// "Think first, then look." A plain <details> element: no JavaScript needed,
+// and it still works if scripts are blocked.
+interface Props {
+  label?: string;
+}
+const { label = "Show the answer" } = Astro.props;
+---
+
+<details class="reveal">
+  <summary>{label}</summary>
+  <div class="reveal-body"><slot /></div>
+</details>

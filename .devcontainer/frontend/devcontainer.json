@@ -1,0 +1,12 @@
+  {
+    "name": "Deskly frontend",
+    "dockerComposeFile": "../../docker-compose.yml",
+    "service": "frontend",
+    "workspaceFolder": "/app",
+    "customizations": {
+      "vscode": {
+        "extensions": ["dbaeumer.vscode-eslint", "esbenp.prettier-vscode"]
+      }
+    },
+    "shutdownAction": "none"
+  }

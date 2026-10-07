@@ -5,7 +5,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-deskly}
       POSTGRES_USER: ${POSTGRES_USER:-deskly}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-deskly}
-    ports: ["5432:5432"]
+    ports: ["5433:5432"]
     volumes: ["pgdata:/var/lib/postgresql/data"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-deskly}"]
@@ -41,6 +41,17 @@ services:
       - /app/node_modules
     ports: ["5173:5173"]
     depends_on: [backend]
+
+  # The course website. Not part of the app, so it only starts when asked for:
+  #   make site   (or: docker compose --profile site up site)
+  site:
+    profiles: ["site"]
+    build: ./site
+    volumes:
+      - ./site:/site
+      - /site/node_modules
+      - ./content:/content
+    ports: ["4321:4321"]
 
 volumes:
   pgdata:

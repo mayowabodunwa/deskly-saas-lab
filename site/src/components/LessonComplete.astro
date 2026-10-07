@@ -1,0 +1,30 @@
+---
+interface Props {
+  id: string;
+}
+const { id } = Astro.props;
+---
+
+<div class="lesson-complete" data-lesson={id}>
+  <button type="button">Mark this lesson complete</button>
+</div>
+
+<script>
+  import { load, save } from "../lib/progress";
+  for (const box of document.querySelectorAll<HTMLElement>(".lesson-complete")) {
+    const id = box.dataset.lesson!;
+    const button = box.querySelector("button")!;
+    const render = () => {
+      const done = !!load().lessons[id];
+      box.classList.toggle("done", done);
+      button.textContent = done ? "✓ Completed (click to undo)" : "Mark this lesson complete";
+    };
+    button.addEventListener("click", () => {
+      const progress = load();
+      progress.lessons[id] = !progress.lessons[id];
+      save(progress);
+      render();
+    });
+    render();
+  }
+</script>

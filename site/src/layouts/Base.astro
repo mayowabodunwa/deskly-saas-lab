@@ -1,0 +1,54 @@
+---
+import "../styles/global.css";
+
+interface Props {
+  title: string;
+  description?: string;
+}
+const { title, description } = Astro.props;
+const path = Astro.url.pathname;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    {description && <meta name="description" content={description} />}
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="/">Support Engineering by Building Systems</a>
+      <nav>
+        <a href="/course/" aria-current={path.startsWith("/course") ? "page" : undefined}>Course</a>
+        <a href="/articles/" aria-current={path.startsWith("/articles") ? "page" : undefined}>Articles</a>
+      </nav>
+    </header>
+    <main>
+      <slot />
+    </main>
+    <script>
+      // Add a "Copy" button to every code block, so readers never mistype a command.
+      for (const pre of document.querySelectorAll("main pre")) {
+        const button = document.createElement("button");
+        button.className = "copy";
+        button.type = "button";
+        button.textContent = "Copy";
+        button.addEventListener("click", async () => {
+          try {
+            await navigator.clipboard.writeText(pre.querySelector("code")?.innerText ?? pre.innerText);
+            button.textContent = "Copied";
+          } catch {
+            button.textContent = "Select and copy";
+          }
+          setTimeout(() => (button.textContent = "Copy"), 1500);
+        });
+        const wrap = document.createElement("div");
+        wrap.className = "code-wrap";
+        pre.replaceWith(wrap);
+        wrap.append(pre, button);
+      }
+    </script>
+  </body>
+</html>
