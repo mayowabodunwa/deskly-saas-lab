@@ -37,8 +37,8 @@ Each phase of the build maps to a real category of support ticket.
 
 | Lesson | Phase built | The ticket it teaches you to handle | Status |
 |---|---|---|---|
-| 0 | Foundation — Docker, Django, Postgres, Redis | *"The site is down."* Which tier is actually broken — frontend, backend, or database? | ⬜ not written |
-| 1 | Domain model & multi-tenancy | *"My data is missing"* / *"I can see another company's data."* One is a bug, one is a breach | ⬜ not written |
+| 0 | Foundation — Docker, Django, Postgres, Redis | *"The site is down."* Which tier is actually broken — frontend, backend, or database? | 📝 [draft](00-the-site-is-down.mdx) |
+| 1 | Domain model & multi-tenancy | *"My data is missing"* / *"I can see another company's data."* One is a bug, one is a breach | 📝 [draft](01-whose-data-is-this.mdx) |
 | 2 | Auth — sessions, JWT, OAuth, roles | *"I can't log in."* The biggest support category. 401 vs 403: "who are you?" vs "I know you, and no" | ⬜ not written |
 | 3 | Admin, impersonation, feature flags | Your own tooling. Impersonation is how you see what the customer sees; flags explain *"why does it work for them and not me?"* | ⬜ not written |
 | 4 | Async — Celery, exports, scheduled email | *"My export never arrived."* Learning that queued is not the same as lost | ⬜ not written |
@@ -65,7 +65,12 @@ Rough notes written in the moment are the honest ones. Polish comes later.
 ## Conventions
 
 - **Every article starts as `draft: true`.** Nothing publishes without review.
-- **One file per lesson**, numbered, in this folder: `NN-slug.md`.
+- **One file per lesson**, numbered, in this folder: `NN-slug.mdx`. MDX is
+  Markdown that can also hold the interactive pieces: `<Reveal>` (hide an
+  answer until the reader clicks), `<Quiz>` and `<Checklist>`. Plain `.md`
+  works too, for a lesson with no interactive parts.
+- **The website lives in [`site/`](../../site/)** and reads these files
+  directly. See its README for how to run it.
 - **Frontmatter is deliberately generator-neutral** — plain YAML that Astro,
   Hugo, Next and Jekyll can all read with minor field renaming. Once a static
   site generator is chosen, adapting the field names is a few minutes' work.

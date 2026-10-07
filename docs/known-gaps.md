@@ -394,5 +394,30 @@ sooner if a dependency is added outside Django/DRF.
 
 ---
 
+## 🟡 GAP-012 — The health check returns `200 OK` even when degraded
+
+**Where:** `backend/apps/core/views.py` — `health()`
+
+When Postgres or Redis is unreachable, the JSON body says
+`{"status":"degraded", ...}`, but the HTTP status code is still `200`.
+
+**What production does:** returns `503 Service Unavailable` when a required
+dependency is down, so anything that only reads the status code reacts.
+Often there are also two separate probes: **liveness** ("is the process
+alive?", which should not fail just because the database is down, or the
+orchestrator restarts healthy pods in a loop) and **readiness** ("should I get
+traffic?", which should fail).
+
+**Why it matters:** load balancers, uptime monitors and Kubernetes probes mostly
+look at the status code, not the body. A `200` tells them everything is fine, so
+they keep routing customers to a backend that can't reach its database.
+
+**Trigger to close:** Phase 8, when this endpoint becomes the Kubernetes probe.
+Also close it as soon as any uptime monitor or load balancer is pointed at it.
+
+Found while writing Lesson 0 (2026-10-07).
+
+---
+
 <!-- New gaps: assign the next GAP-NNN, pick a severity, and always fill in the
      trigger. A gap with no trigger becomes permanent by accident. -->

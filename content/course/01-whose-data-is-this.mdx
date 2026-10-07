@@ -1,0 +1,766 @@
+---
+title: "Lesson 1: Whose data is this? How one database keeps customers apart"
+description: "Why 'I can see another company's data' is the worst ticket a SaaS support team can get, and how to build, break and test the wall that prevents it."
+pubDate: 2026-10-07
+lesson: 1
+phase: 1
+tags: [multi-tenancy, django, postgres, data-isolation, testing, security]
+ticket: "I can see another company's tickets in our account."
+draft: true
+---
+
+import Reveal from "../../site/src/components/Reveal.astro";
+import Quiz from "../../site/src/components/Quiz.astro";
+import Checklist from "../../site/src/components/Checklist.astro";
+
+## The ticket
+
+Two tickets arrive on the same morning.
+
+```
+Subject: some of our tickets are gone??
+From: Support lead, Acme Corp
+
+Half our tickets from last week aren't showing up. My team swears
+they replied to them. Did you delete something?? We need these back today.
+```
+
+```
+Subject: is this a mistake
+From: Office manager, Acme Corp
+
+I opened our ticket list and there's one at the top called
+"Globex merger plans - confidential". We are not Globex.
+Should I be seeing this?
+```
+
+**What you can tell from these alone:** almost nothing. Neither customer knows
+how the system works, and neither should have to. The first one *sounds*
+urgent. The second one sounds polite and confused.
+
+The second one is the emergency. The first is probably a bug. The second is a
+**data breach**: one customer reading another customer's private information.
+In many countries that comes with a legal duty to tell the affected customer.
+
+By the end of this lesson you'll have built the wall that's supposed to stop
+the second ticket from ever happening. You'll have knocked holes in it on
+purpose, three different ways, and you'll know what to check first when either
+ticket lands in your queue.
+
+## Why this part of the system exists
+
+Deskly is a help desk that many companies use at the same time. Acme uses it.
+Globex uses it. They are strangers, possibly competitors, and both of them
+store their customers' problems in it.
+
+Think of an **apartment building**. One building, one set of pipes, one
+electricity supply. That's cheap to run, because everyone shares the
+expensive parts. But every flat has its own front door, and your key only
+opens yours.
+
+Deskly works the same way. There's **one** running app and **one** database.
+Every company's tickets sit side by side in the same table. The "front doors"
+are made of code, and this lesson is about building them.
+
+If a key opens the neighbour's door, you get the second ticket above.
+
+## Concepts you need
+
+- **Tenant**: one customer company using the system. Acme is a tenant. Globex
+  is a tenant. (Same word as a tenant in a building.)
+- **Multi-tenant**: many tenants share one running system, each walled off
+  from the others. Most SaaS products work this way: Slack, Shopify, GitHub.
+- **Database table**: a spreadsheet the app stores data in. One row per
+  ticket, one column per fact about it (subject, status, when it was created).
+- **Tenant column**: a column on every row that says which company it belongs
+  to. In Deskly it's called `organization`. This is the "name on the door".
+- **Foreign key**: a column that points at a row in *another* table. A ticket's
+  `organization` column holds the id of a row in the organizations table.
+- **Model**: a Python class that describes one table. Django (the web framework
+  Deskly uses) turns it into a real table for you.
+- **Migration**: a saved, replayable instruction for changing the database's
+  shape, like "add a tickets table". Every developer's machine, and later
+  production, runs the same migrations, so everyone ends up with the same
+  tables.
+- **Query**: a question you ask the database. "Give me all tickets" is a query.
+  So is "give me Acme's tickets". The difference between those two is the
+  whole lesson.
+- **Slug**: a short, readable name used in web addresses: `acme` in
+  `/api/orgs/acme/tickets/`.
+- **API endpoint**: a web address that returns data instead of a web page.
+  The frontend, a mobile app or a curious customer with `curl` can all call it.
+- **Test**: a small program that checks your real program behaves the way you
+  promised. It runs in seconds and doesn't get tired or forget.
+- **Idempotent**: safe to run twice. Running it a second time leaves things
+  exactly as the first run did.
+
+## Build it
+
+This lesson builds on [Lesson 0](00-the-site-is-down.mdx), which left you with
+Deskly running in Docker: a Django backend, a Postgres database and Redis, all
+started with `make up`. Every command below runs **inside** the backend
+container, which is why so many start with `docker compose exec backend`.
+
+The build happens in five slices. Each one ends with something you can see
+working.
+
+### Slice 1: a table for companies
+
+First, Deskly needs to know what a "company" is. Create an app (Django's word
+for a folder of related code) called `organizations`:
+
+```bash
+docker compose exec backend mkdir -p apps/organizations
+docker compose exec backend python manage.py startapp organizations apps/organizations
+```
+
+Then describe the table in `backend/apps/organizations/models.py`:
+
+```python
+class Organization(models.Model):
+    """One customer company using Deskly."""
+
+    name = models.CharField(max_length=200)
+    slug = models.SlugField(unique=True)
+    plan = models.CharField(max_length=20, default="free")
+    created_at = models.DateTimeField(auto_now_add=True)
+```
+
+`unique=True` on `slug` matters. It means the **database itself** refuses a
+second company called `acme`, even if some code somewhere has a bug.
+
+The same file also gets a `Membership` model: one row per person per company,
+with a role (owner, agent or viewer). Nobody can log in yet, so it sits unused
+until Lesson 2. It's in place now because "which people belong to which
+company" is the other half of the wall.
+
+Add `"apps.organizations"` to `INSTALLED_APPS` in `settings.py`, then turn the
+model into a real table:
+
+```bash
+docker compose exec backend python manage.py makemigrations organizations
+docker compose exec backend python manage.py migrate
+```
+
+`makemigrations` writes the instruction. `migrate` carries it out.
+
+### Slice 2: tickets that know who they belong to
+
+Now the tickets. Create a second app, `tickets`, the same way. In its
+`models.py`:
+
+```python
+class TenantQuerySet(models.QuerySet):
+    def for_org(self, organization):
+        return self.filter(organization=organization)
+
+
+class Ticket(models.Model):
+    # (the Status choices — open, pending, resolved, closed — are left out here)
+    organization = models.ForeignKey(
+        Organization, on_delete=models.CASCADE, related_name="tickets",
+    )
+    subject = models.CharField(max_length=200)
+    body = models.TextField(blank=True)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.OPEN)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    objects = TenantQuerySet.as_manager()
+```
+
+Two things to notice:
+
+1. **Every ticket has an `organization`.** There's no such thing as a ticket
+   that belongs to nobody.
+2. **`for_org` is the safe way to ask for tickets.** It's one line: "only the
+   ones belonging to this company". It looks too small to matter. It's the
+   most important line in the lesson, and you'll see why in a minute.
+
+`on_delete=models.CASCADE` means "if a company is deleted, delete its tickets
+too". That's a business decision, not a technical one: when a customer asks
+you to delete their data, this is what makes it actually go.
+
+A `Comment` model (a reply on a ticket) goes in the same file. It also carries
+an `organization`, and the [break section](#break-3-a-comment-with-two-owners)
+shows why that creates a problem of its own.
+
+### Slice 3: let the web address pick the company
+
+The data exists. Now something has to *serve* it. Deskly uses addresses like:
+
+```
+/api/orgs/acme/tickets/
+/api/orgs/globex/tickets/
+```
+
+The company is right there in the address. The code that answers it, in
+`backend/apps/tickets/views.py`:
+
+```python
+@api_view(["GET", "POST"])
+@permission_classes([AllowAny])
+def ticket_list(request, slug):
+    organization = get_object_or_404(Organization, slug=slug)    # 1. which company?
+
+    if request.method == "POST":
+        serializer = TicketSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save(organization=organization)                # 3. stamp it ourselves
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    tickets = Ticket.objects.for_org(organization)                # 2. only theirs
+    return Response(TicketSerializer(tickets, many=True).data)
+```
+
+In plain words:
+
+1. **Find the company named in the address.** If there's no such company,
+   stop with `404 Not Found`. Nothing below this line runs without a company.
+2. **Reading:** fetch only that company's tickets.
+3. **Writing:** stamp the new ticket with the company *from the address*, and
+   ignore anything the caller sent about which company it belongs to.
+
+A **serializer** translates between database rows and JSON (the text format
+APIs speak). Deskly's `TicketSerializer` deliberately leaves `organization` off
+its list of fields:
+
+```python
+fields = ["id", "subject", "body", "status", "created_at", "updated_at"]
+```
+
+So even if a caller sends `"organization": 3`, the serializer never reads it.
+Together with step 3, that's **two separate guards** on the same door. Either
+one alone would stop the attack in [Break 2](#break-2-a-ticket-planted-in-someone-elses-account),
+and you'll prove that.
+
+### Slice 4: demo data you can rebuild with one command
+
+Up to now, every company and ticket was typed by hand. That data only exists
+on your laptop, and nobody else can reproduce it. A **management command** is
+a Python file Django can run with the whole project loaded. Deskly's lives at
+`backend/apps/core/management/commands/seed_demo.py`:
+
+```python
+class Command(BaseCommand):
+    help = "Create demo organizations and tickets for local development."
+
+    @transaction.atomic
+    def handle(self, *args, **options):
+        acme, _ = Organization.objects.get_or_create(
+            slug="acme", defaults={"name": "Acme Corp"},
+        )
+        globex, _ = Organization.objects.get_or_create(
+            slug="globex", defaults={"name": "Globex"},
+        )
+        Ticket.objects.get_or_create(
+            organization=acme,
+            subject="Printer won't work",
+            defaults={"body": "The office printer jams on every third page."},
+        )
+        # ... one more for Acme, one for Globex
+```
+
+Run it with `make seed`. Two details make it safe:
+
+- **`get_or_create`** means "find it if it's already there, otherwise make it".
+  Run the command ten times and you still have three tickets. That's what
+  *idempotent* means.
+- **`@transaction.atomic`** means "all or nothing". If anything fails halfway,
+  every change from this run is thrown away. You never get half a seed.
+
+### Slice 5: a test that says no for you
+
+Everything so far is a *habit*: always use `for_org`, always stamp the company
+yourself. Habits slip at 4pm on a Friday. A test doesn't.
+
+In `backend/apps/tickets/tests.py`:
+
+```python
+class TenantIsolationTests(TestCase):
+    def setUp(self):
+        self.acme = Organization.objects.create(name="Acme Corp", slug="acme")
+        self.globex = Organization.objects.create(name="Globex", slug="globex")
+        Ticket.objects.create(organization=self.acme, subject="Printer won't work")
+        Ticket.objects.create(organization=self.globex, subject="Globex merger plans")
+
+    def test_ticket_list_endpoint_is_scoped_to_the_url_org(self):
+        response = self.client.get("/api/orgs/acme/tickets/")
+        self.assertEqual(response.status_code, 200)
+        subjects = [ticket["subject"] for ticket in response.json()]
+        self.assertEqual(subjects, ["Printer won't work"])
+
+    def test_posting_with_another_orgs_id_still_lands_in_the_url_org(self):
+        response = self.client.post(
+            "/api/orgs/acme/tickets/",
+            {"subject": "Planted", "organization": self.globex.id},
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 201)
+        planted = Ticket.objects.get(subject="Planted")
+        self.assertEqual(planted.organization, self.acme)
+```
+
+`setUp` builds a tiny world with two companies. Then each test asks a single
+question:
+
+- Does Acme's ticket list show *only* Acme's ticket?
+- If someone posts to Acme's address while claiming to be Globex, does the
+  ticket still land in Acme?
+
+The suite has four tests in total: the two above, one that checks `for_org`
+directly, and one for comments (see Break 3). Tests run against a separate,
+throwaway database, so your demo data is never touched.
+
+Finally, those tests run **automatically** on every pull request, using GitHub
+Actions (`.github/workflows/ci.yml`). The `main` branch is protected so a pull
+request can't merge until the `test` check passes.
+
+## Verify it
+
+**You'll know it worked when:** each company's address returns only that
+company's tickets, and the test suite passes.
+
+```bash
+make seed
+curl http://localhost:8000/api/orgs/acme/tickets/
+curl http://localhost:8000/api/orgs/globex/tickets/
+curl -i http://localhost:8000/api/orgs/nosuchcompany/tickets/
+```
+
+```
+acme:          2 tickets ("Printer won't work", "Password reset")
+globex:        1 ticket  ("Globex merger plans - confidential")
+nosuchcompany: HTTP/1.1 404 Not Found
+```
+
+```bash
+make test
+```
+
+```
+....
+----------------------------------------------------------------------
+Ran 4 tests in 0.013s
+
+OK
+```
+
+Four dots means four tests passed.
+
+<Checklist id="l1-verify" items={[
+  "<code>make seed</code> ran without an error",
+  "Acme's address returns 2 tickets",
+  "Globex's address returns 1 ticket",
+  "An unknown company returns <code>404 Not Found</code>",
+  "<code>make test</code> shows 4 dots and <code>OK</code>",
+]} />
+
+## Break it, then fix it
+
+This is the part that matters. Three breaks, each one a real way this wall
+fails in production. Each time, try to reason from **what you can see**
+before reading the cause.
+
+### Break 1: one word that leaks everything
+
+**Break it.** In `backend/apps/tickets/views.py`, change the read line:
+
+```python
+tickets = Ticket.objects.for_org(organization)    # before
+tickets = Ticket.objects.all()                    # after
+```
+
+`all()` is the first thing every Django tutorial teaches. It looks harmless.
+
+**What the customer sees:** the second ticket from the top of this lesson.
+Acme's list now includes "Globex merger plans - confidential".
+
+**What you see:** nothing. No error. No red text. Nothing in the logs. The page
+loads in the usual time and returns `200 OK`. By every measure a monitoring
+tool can check, the system is healthy.
+
+**Reason it through:**
+
+1. **Is this one customer or everyone?** Ask a second customer to check their
+   list. If Globex can also see Acme's tickets, the filter is gone, not
+   pointed at the wrong company.
+2. **Is it every screen, or one?** The ticket list leaks, but the company
+   details page doesn't. That points at one piece of code, not the database.
+3. **Does a test catch it?** Run `make test`:
+
+```
+.F
+======================================================================
+FAIL: test_ticket_list_endpoint_is_scoped_to_the_url_org
+AssertionError: Lists differ: ['Globex merger plans', "Printer won't work"] != ["Printer won't work"]
+```
+
+One test passed (`.`) and one failed (`F`). The test that passed only checks
+that `for_org` *works*. It still does. Nobody was calling it any more. The
+test that failed goes through the real web address, the same path a customer's
+browser takes, and that's the one that caught the leak.
+
+<Reveal label="Think it through first, then show the root cause">
+
+**Root cause:** `all()` means "every ticket in the database, for every
+company". The code did exactly what it said. It was answering the wrong
+question.
+
+</Reveal>
+
+**Fix it:** put `for_org(organization)` back. Run `make test`. Four dots.
+
+**Why this failure mode is dangerous:** three things stack up.
+
+- The dangerous version is the more natural thing to type.
+- Nothing complains when you do.
+- On a developer's laptop with only one company in the database, `all()` and
+  `for_org()` return **the same rows**. The bug can only show up once a second
+  company exists. In other words, in production.
+
+### Break 2: a ticket planted in someone else's account
+
+Break 1 was about *reading* the wrong data. This one is about *writing* into
+the wrong place.
+
+**Break it.** Weaken **both** guards from Slice 3: add `"organization"` to the
+serializer's `fields`, and change `serializer.save(organization=organization)`
+to plain `serializer.save()`. Then:
+
+```bash
+curl -i -X POST http://localhost:8000/api/orgs/acme/tickets/ \
+  -H "Content-Type: application/json" \
+  -d '{"subject":"Planted by Acme","body":"this should not be in Globex","organization":3}'
+```
+
+```
+HTTP/1.1 201 Created
+```
+
+**What the customer sees:** Globex finds a ticket in their account that none of
+their staff wrote. Worse, they might *believe* it and act on it.
+
+**What you see:** a perfectly normal `201 Created`. The caller only ever used
+Acme's address.
+
+**Reason it through:**
+
+1. **Who created it?** Match the ticket's `created_at` time against the
+   server's request log. The only request at that second is a `POST` to
+   *Acme's* address, not Globex's.
+2. **Where did the company come from?** If the address said `acme` and the
+   ticket says Globex, the company came from somewhere other than the address.
+   The only other place is the request body.
+3. **Which guard failed?** Put each guard back on its own and repeat the
+   request. Each one alone is enough to stop it. Only removing both lets the
+   ticket escape.
+
+<Reveal label="Think it through first, then show the root cause">
+
+**Root cause:** the server let the *caller* decide which company owns the new
+ticket. The attack takes no skill at all: change one number in some JSON.
+
+</Reveal>
+
+**Fix it:** restore both guards. Repeat the same request: still `201 Created`,
+but the ticket now lands in **Acme**. The `"organization": 3` is quietly
+*ignored*, not rejected. Delete the planted rows by their id.
+
+**Why this failure mode is dangerous:** the safe line and the unsafe line are
+nearly identical:
+
+```python
+serializer.save()                            # unsafe
+serializer.save(organization=organization)   # safe
+```
+
+Both return `201`. Both read naturally. In a single-company app the first one is
+simply correct, so it's what every tutorial shows. It sails through code review
+because nothing about it *looks* wrong.
+
+### Break 3: a comment with two owners
+
+This one doesn't need anything broken. The hole was there from Slice 2.
+
+A comment stores its company **twice**: in its own `organization` column, and
+indirectly through the ticket it replies to. The extra copy is there for speed,
+so "all of Acme's comments" doesn't have to go through the tickets table. But
+nothing forced the two copies to agree.
+
+Think of a filing cabinet. Each ticket is a folder with a company name on the
+tab. Each comment is a sheet of paper inside, and each sheet *also* has a
+company stamped on it. Nothing stops a sheet stamped "Acme" from being filed in
+the Globex folder.
+
+**Break it.** In the Django shell (`make exec`):
+
+```python
+acme = Organization.objects.get(slug="acme")
+globex_ticket = Ticket.objects.get(subject__startswith="Globex merger")
+
+bad = Comment.objects.create(organization=acme, ticket=globex_ticket, body="Who owns me?")
+
+Comment.objects.for_org(acme).count()    # 1
+globex_ticket.comments.count()           # 1
+```
+
+**What the customer sees:** Acme sees a reply that belongs to Globex's private
+conversation. Or, from Globex's side, a reply on their ticket that no one at
+Globex wrote.
+
+**What you see:** no error on the `create` line. One comment, counted by **both**
+companies.
+
+<Reveal label="Think it through first, then show the root cause">
+
+**Root cause:** whenever you store the same fact twice, you've made a way for
+the two copies to disagree. Different parts of the app check different copies.
+
+</Reveal>
+
+**Fix it.** Make the comment always take its company from its ticket. In the
+`Comment` model:
+
+```python
+def save(self, *args, **kwargs):
+    self.organization = self.ticket.organization
+    super().save(*args, **kwargs)
+```
+
+Line one copies the company from the ticket. `super().save(...)` hands over to
+Django's normal save, which actually writes to the database. Leave that line
+out and nothing gets saved at all.
+
+Run the same `create` again, then check:
+
+```python
+bad.organization.slug    # 'globex'
+```
+
+You asked for Acme. The comment followed its folder.
+
+Then add a test so it can't come back:
+
+```python
+def test_comment_takes_its_org_from_its_ticket(self):
+    globex_ticket = Ticket.objects.get(subject="Globex merger plans")
+    comment = Comment.objects.create(
+        organization=self.acme, ticket=globex_ticket, body="Who owns me?"
+    )
+    self.assertEqual(comment.organization, self.globex)
+```
+
+**Then break the fix on purpose.** Put a `#` in front of the copy line and run
+`make test`. You should see `FAILED (failures=1)`. Remove the `#`, run it again,
+and you're back to `OK`. **A test you've never seen fail proves nothing:** a
+test with a typo in it passes just as convincingly as a correct one.
+
+**Why this failure mode is dangerous:** the database stored the contradiction
+without complaint. No code path was "wrong". The bug was in the *shape* of the
+data.
+
+### Check yourself
+
+<Quiz
+  question="Your test run prints .F and then a FAIL. What does that mean?"
+  options={[
+    "Two tests failed",
+    "One test passed and one test failed",
+    "One test crashed before it could check anything",
+  ]}
+  answer={1}
+>
+Each character is one test. A dot is a pass, F is a failure (the test ran and
+its check didn't hold), and E is an error (the test crashed before checking
+anything). In Break 1, the dot was the test of the tool and the F was the test
+of the web address.
+</Quiz>
+
+<Quiz
+  question="A customer sees a reply on their own ticket that nobody at their company wrote. The ticket is definitely theirs. What's the most likely cause?"
+  options={[
+    "The ticket list is missing its company filter",
+    "The reply's company doesn't match its ticket's company",
+    "The customer isn't logged in",
+  ]}
+  answer={1}
+>
+The ticket is in the right place, so the ticket filter is working. The odd one
+out is a single reply: that's the two-owner problem from Break 3, where a
+comment's own company and its ticket's company disagree.
+</Quiz>
+
+## Trade-offs & decisions
+
+**How to keep companies apart.** There are three standard designs:
+
+| Option | How it works | Good | Bad | Chosen |
+|---|---|---|---|---|
+| **Tenant column** | One table for everyone, a company column on each row, every query filters by it | Cheapest; adding a customer is adding a row | One forgotten filter leaks data, silently | ✅ |
+| Schema per tenant | A separate set of tables per company, in one database | A leak needs a deliberate mistake, not a forgotten one | Every change must be applied to every customer's tables | |
+| Database per tenant | A whole separate database per company | Strongest wall there is | Cost grows with every customer | |
+
+Deskly uses the tenant column, as most SaaS products do at the start. Its one
+weakness is that forgotten filter, so everything in this lesson is about
+making the filter hard to forget (`for_org`) and impossible to forget quietly
+(the tests). Full record:
+[`docs/adr/0002-tenant-column-isolation.md`](../../docs/adr/0002-tenant-column-isolation.md).
+
+**Ignore the caller's company, or reject the request?** When a request names
+the wrong company, Deskly *ignores* it and uses the right one, for both
+tickets and comments. The alternative is to refuse with an error. Refusing
+makes mistakes loud, but it breaks any caller that harmlessly echoes back fields
+it was given. Ignoring is quieter, at the cost of a bug upstream never being
+reported. Deskly picks one rule and sticks to it: **the company always comes
+from the parent** (the address for tickets, the ticket for comments), never
+from what the caller typed.
+
+**`404` for a company you can't see, not `403`.** `403 Forbidden` would confirm
+the company exists. If an unknown company gave `404` and a real one gave `403`,
+anyone could test names (`tesla`, `stripe`) and learn your customer list from
+the status codes. Answering `404` for both gives nothing away. This matters
+from Lesson 2 onwards, once there are logins to check.
+
+**Use a slug in the address, not a number.** `/api/orgs/acme/` instead of
+`/api/orgs/1/`. Numbers count up, so `/api/orgs/4182/` tells a competitor
+roughly how many customers you have. A slug says nothing about that.
+
+## What actually broke for me
+
+Real errors from building this, quoted exactly as they appeared.
+
+**The server went silent.**
+
+```
+curl: (52) Empty reply from server
+```
+
+No status code at all. A `404` or `500` proves the server is alive. Silence
+means it never started. The logs (`docker compose logs --tail=40 backend`)
+explained why:
+
+```
+  File "/app/apps/organizations/urls.py", line 7, in <module>
+    path("<slug:slug>/", include("apps.tickets.urls")),
+                         ^^^^^^^
+NameError: name 'include' is not defined
+```
+
+One missing word in an import line. Django reads `urls.py` once, at startup, so
+a mistake there stops the whole server before it can even send an error page.
+**On silence, read the logs, not the browser.**
+
+**The seed command tripled the tickets.** The first version used `create()`
+instead of `get_or_create()`. The second run failed loudly on the companies:
+
+```
+django.db.utils.IntegrityError: duplicate key value violates unique constraint "organizations_organization_slug_key"
+DETAIL:  Key (slug)=(globex) already exists.
+```
+
+Once that was patched, it "succeeded" every time:
+
+```
+Seeded demo data.
+```
+
+But the table kept growing: three tickets became nine. Companies have a unique
+slug, so the database refused duplicates. Tickets have no unique field, so
+nothing objected. The loud failure was the lucky one. The giveaway was the
+timestamps: rows created by a program land within milliseconds of each other,
+so each batch of three marked one run.
+
+**The test passed while the API leaked.** The `.F` result from Break 1. One test
+checked the tool, the other checked the door. Only the door test caught it.
+
+**The shell said "fixed", the tests said otherwise.**
+
+```
+ValueError: A comment's organization must match its ticket's organization.
+
+Ran 4 tests in 0.013s
+
+FAILED (errors=1)
+```
+
+An earlier, stricter version of the comment fix was still saved in the file,
+while the open Django shell had been running a different version. The shell
+reads your code **once**, when it starts. Tests read the file fresh every time.
+When the two disagree, believe the tests and restart the shell.
+
+**`make` refused to run anything.**
+
+```
+Makefile:5: *** missing separator.  Stop.
+```
+
+Lines under a Makefile target must start with a real Tab character, not spaces.
+macOS ships a very old version of Make (3.81) with no way around that.
+
+## Production reality check
+
+What this lab does vs. what a real SaaS company would do. The full list lives
+in [`docs/known-gaps.md`](../../docs/known-gaps.md).
+
+- 🔴 **Anyone can read any company's data by typing its name.**
+  `curl /api/orgs/globex/tickets/` works for everybody. The address picks *which*
+  company. Nothing checks whether *you* belong to it. That needs logins, which
+  arrive in Lesson 2. Until then, the wall in this lesson keeps companies apart
+  from *each other's code paths*, not from strangers. (GAP-006)
+- 🟡 **The comment rule lives in Python, not in the database.** The `save()` fix
+  only runs when the app saves one comment at a time. Bulk updates, bulk inserts
+  and anyone writing SQL directly can still create a two-owner comment. The
+  proper fix makes the database itself refuse it. (GAP-010)
+- **The filter is still optional.** `Ticket.objects.all()` still exists and still
+  works. The tests catch it on the paths they cover. Some teams go further with
+  **Postgres Row-Level Security**, where the database refuses to return another
+  company's rows even if the code forgets to ask. It's stronger, but harder to
+  debug, which is why this lab hasn't adopted it yet.
+- **CI runs tests only.** There's no automated style checking or security
+  scanning of the packages Deskly uses yet. (GAP-011)
+- **The repo admin can still bypass branch protection.** That's fine for one
+  person learning. A team would turn the bypass off.
+
+## Support takeaways
+
+**"I can see another company's data": check in this order.**
+
+1. **Treat it as a security incident from the first message.** Don't ask the
+   customer to "try clearing their cache". Get a screenshot, the exact address
+   they were on, and the time, then escalate.
+2. **Is it one screen or every screen?** One screen means one piece of code with
+   a missing or wrong filter. Every screen means something more fundamental,
+   such as how the company is worked out from the login or address.
+3. **Is it read or write?** "I can see their ticket" is a read leak. "A ticket
+   appeared in our account that none of us wrote" is a write leak, which might
+   mean someone deliberately planted it.
+4. **Does the leaked item have two owners?** A reply showing up on the wrong
+   company's ticket, while the ticket itself is fine, points at duplicated data
+   that's out of sync (Break 3), not a missing filter.
+
+**"My data is missing": check in this order.**
+
+1. **Are they looking at the right company?** People who belong to two
+   workspaces often open the wrong one. Rule this out first, because it's
+   quick and very common.
+2. **Did the address change?** A typo or a renamed company slug gives `404`
+   (Not Found), which customers describe as "everything is gone".
+3. **Did the data move rather than vanish?** If a comment's company doesn't
+   match its ticket, one company "loses" a reply that another company can see.
+   That's a missing-data ticket and a leak ticket at the same time.
+
+**Questions to ask the customer:** Which company or workspace were you in? What
+is the exact address in your browser bar? When did you first notice? Can you
+send a screenshot showing the item and the company name together?
+
+**When to escalate:** immediately, for any report of seeing another company's
+data, even if you can't reproduce it. The customer's report is usually the
+**first** sign anything went wrong. No error appeared anywhere, and no
+dashboard noticed.
+
+## Next
+
+Lesson 2 adds logins: "who are you?" (`401 Unauthorized`) vs "I know who you are,
+and no" (`403 Forbidden`). That finally closes the 🔴 gap where anyone can read
+any company's data just by typing its name.

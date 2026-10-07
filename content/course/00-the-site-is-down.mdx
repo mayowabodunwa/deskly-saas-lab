@@ -1,0 +1,516 @@
+---
+title: "Lesson 0: 'The site is down.' Which part, exactly?"
+description: "Run a real four-part web system on your laptop, then switch the parts off one by one to learn what each failure looks like from the outside."
+pubDate: 2026-10-07
+lesson: 0
+phase: 0
+tags: [docker, docker-compose, health-checks, architecture, debugging]
+ticket: "The site is down."
+draft: true
+---
+
+import Reveal from "../../site/src/components/Reveal.astro";
+import Quiz from "../../site/src/components/Quiz.astro";
+import Checklist from "../../site/src/components/Checklist.astro";
+
+## The ticket
+
+```
+Subject: SITE DOWN
+From: Team lead, Acme Corp
+
+Nothing is working. We can't get into Deskly at all.
+This is costing us money. Please fix ASAP.
+```
+
+**What you can tell from this alone:** nothing at all, and that's normal.
+"The site is down" is the most common ticket in the world, and it almost never
+means what it says. Usually *one part* of the system is down while the rest is
+fine. Sometimes nothing is down and the customer's own network is the problem.
+
+A website isn't one thing. It's several separate programs passing a request
+along like a relay race. When the customer says "down", your first job is to
+find out **which runner dropped the baton**.
+
+This lesson sets up those runners on your own laptop, then switches each one
+off on purpose so you learn what each failure looks like from the outside.
+
+## Why this part of the system exists
+
+Think of a **restaurant**:
+
+- The **front door** is where every customer comes in.
+- The **kitchen** does the actual work.
+- The **fridge** holds the ingredients.
+- A **notepad by the pass** holds quick, temporary notes.
+
+A customer never walks into the fridge. Their order goes door → kitchen →
+fridge, and the food comes back the same way.
+
+Deskly is built the same way, from four separate programs:
+
+| Restaurant | Deskly | What it does |
+|---|---|---|
+| Front door | **frontend** (React) | The screens the customer sees in their browser |
+| Kitchen | **backend** (Django) | The logic: who can see what, what to save |
+| Fridge | **database** (Postgres) | Stores everything permanently |
+| Notepad | **Redis** | Fast, temporary storage (used for queues and caching in later lessons) |
+
+Why split it up instead of one big program? Because when one part breaks, the
+others can keep going, and you can tell *which* part broke. That's the whole
+skill this lesson teaches.
+
+## Concepts you need
+
+- **Tier**: one layer in the path a request travels: screen → logic → data.
+- **Container**: a sealed box holding one program plus everything it needs
+  to run, so it behaves the same on every machine. Each of Deskly's four parts
+  runs in its own container.
+- **Docker**: the tool that builds and runs containers.
+- **Docker Compose**: one file (`docker-compose.yml`) that lists several
+  containers and how they connect, so one command starts them all.
+- **Port**: a numbered door on a computer. Only one program can use a given
+  door at a time. Deskly's backend listens on door 8000, the frontend on 5173.
+- **Proxy**: a go-between that passes requests on to someone else. Deskly's
+  frontend passes anything starting with `/api` on to the backend.
+- **Health check**: a special address that answers "am I OK, and are the
+  things I depend on OK?". Machines call it constantly to decide whether to
+  send traffic.
+- **Environment variables / `.env`**: settings (like passwords) kept *outside*
+  the code, in a file that never goes into git.
+
+## Build it
+
+The Deskly starter repo ships with this part already set up. Phase 0 is
+plumbing, not product. This section walks through what each piece does,
+because you can't diagnose a part you don't know exists.
+
+### One file describes the whole system
+
+`docker-compose.yml` lists the four services. Here's the database:
+
+```yaml
+  db:
+    image: postgres:16
+    ports: ["5433:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-deskly}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+```
+
+- `image: postgres:16` means "use the official Postgres 16 box". No installing
+  Postgres on your laptop.
+- `ports: ["5433:5432"]` means "door 5433 on my laptop leads to door 5432 inside
+  the container". (Why not 5432 on both sides? See
+  [What actually broke for me](#what-actually-broke-for-me).)
+- `volumes` keeps the data in a named storage area, so it survives restarts.
+- `healthcheck` asks the database "are you ready?" every 5 seconds.
+
+And the backend:
+
+```yaml
+  backend:
+    build: ./backend
+    command: sh -c "python manage.py migrate && python manage.py runserver 0.0.0.0:8000"
+    env_file: [.env]
+    volumes: ["./backend:/app"]
+    ports: ["8000:8000"]
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_healthy }
+```
+
+The `depends_on` lines say: **don't start the backend until the database and
+Redis say they're healthy.** "Started" isn't enough. A database can be running
+but not yet ready to answer, and a backend that connects too early crashes with
+"connection refused".
+
+`volumes: ["./backend:/app"]` connects your `backend` folder to the inside of
+the container. Edit a file on your laptop, and the running app sees the change
+straight away, with no rebuild.
+
+### The frontend passes `/api` calls to the backend
+
+In `frontend/vite.config.ts`:
+
+```ts
+proxy: { "/api": { target: apiTarget, changeOrigin: true } },
+```
+
+The browser only ever talks to the frontend on port 5173. Anything starting
+with `/api` gets passed along to the backend behind the scenes. That's the
+"front door": one way in, and it sends each request to the right room. In
+production a dedicated program (like Nginx) does this job. Same idea, different
+doorman.
+
+### A health check that actually checks
+
+`backend/apps/core/views.py`:
+
+```python
+def health(request):
+    db_ok = True
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 1")
+    except Exception:
+        db_ok = False
+
+    redis_ok = True
+    try:
+        redis.from_url(settings.REDIS_URL, socket_connect_timeout=2).ping()
+    except Exception:
+        redis_ok = False
+
+    status = "ok" if db_ok and redis_ok else "degraded"
+    return Response({"status": status, "db": db_ok, "redis": redis_ok})
+```
+
+In plain words: ask the database a trivial question (`SELECT 1` just means
+"say 1"). Then ping Redis. Report on both.
+
+A lazy health check returns "OK" whenever the backend itself is running. This
+one goes and *checks the fridge*. That difference is what makes it useful in
+the break section.
+
+### Start it
+
+Copy the settings template, then start everything:
+
+```bash
+cp .env.example .env
+make up
+```
+
+`make up` is a shortcut for `docker compose up --build`: build the boxes,
+start all four, and show their logs. Leave it running and use a second terminal
+for everything below.
+
+## Verify it
+
+**You'll know it worked when:** all four services are up, and the health check
+reports both data stores as fine, through both doors.
+
+```bash
+docker compose ps
+```
+
+```
+SERVICE    STATUS                    PORTS
+backend    Up 52 minutes             0.0.0.0:8000->8000/tcp, [::]:8000->8000/tcp
+db         Up 52 minutes (healthy)   0.0.0.0:5433->5432/tcp, [::]:5433->5432/tcp
+frontend   Up 52 minutes             0.0.0.0:5173->5173/tcp, [::]:5173->5173/tcp
+redis      Up 52 minutes (healthy)   0.0.0.0:6379->6379/tcp, [::]:6379->6379/tcp
+```
+
+Notice that only `db` and `redis` say **(healthy)**. The backend and frontend
+just say **Up**, because they have no health check of their own in Compose.
+"Up" only means the program started. It says nothing about whether it works.
+
+```bash
+curl localhost:8000/api/health/     # knock on the backend directly
+curl localhost:5173/api/health/     # knock on the front door
+```
+
+```
+{"status":"ok","db":true,"redis":true}
+{"status":"ok","db":true,"redis":true}
+```
+
+Same answer both ways. The second one went through the frontend's proxy, and
+you never typed port 8000. One request, crossing every tier: front door →
+backend → database and Redis → back out.
+
+<Checklist id="l0-verify" items={[
+  "<code>make up</code> is running in its own terminal",
+  "<code>docker compose ps</code> shows <code>db</code> and <code>redis</code> as (healthy)",
+  "The health check says <code>ok</code> on port 8000",
+  "…and the same through the front door on port 5173",
+]} />
+
+## Break it, then fix it
+
+Switch off one part at a time. Each time, ask: *what would the customer say,
+and what would I see?*
+
+### Break 1: the fridge is locked
+
+```bash
+docker compose stop db
+curl localhost:8000/api/health/
+```
+
+```
+{"status":"degraded","db":false,"redis":true}
+```
+
+**What the customer sees:** the app loads, but nothing saves, and lists are
+empty or show errors. They say "the site is down", but the screens appear.
+
+**What you see:** the backend is alive and *answering*, and it tells you
+exactly which dependency is missing: `"db": false`.
+
+**Fix it:**
+
+```bash
+docker compose start db
+```
+
+Wait a few seconds for it to pass its own health check, then curl again. It's
+back to `ok`.
+
+### Break 2: the notepad is gone
+
+```bash
+docker compose stop redis
+curl localhost:8000/api/health/
+```
+
+```
+{"status":"degraded","db":true,"redis":false}
+```
+
+**What the customer sees:** today, nothing at all. Deskly doesn't use Redis for
+anything a customer touches yet. From Lesson 4 onwards, this is "my export
+never arrived".
+
+**What you see:** `"redis": false`, and everything else fine. One part down,
+the rest still serving. That's what "degraded, not dead" means, and it's the
+payoff for splitting the system into parts.
+
+**Fix it:** `docker compose start redis`.
+
+### Break 3: the kitchen closes
+
+Before you run this, guess: the frontend is still running. What will each of
+the two `curl` commands show?
+
+```bash
+docker compose stop backend
+curl localhost:8000/api/health/
+curl -i localhost:5173/api/health/
+```
+
+```
+curl: (7) Failed to connect to localhost port 8000 after 0 ms: Couldn't connect to server
+```
+
+```
+HTTP/1.1 500 Internal Server Error
+Vary: Origin
+Content-Type: text/plain
+Date: Wed, 07 Oct 2026 08:53:59 GMT
+Connection: keep-alive
+Keep-Alive: timeout=5
+Transfer-Encoding: chunked
+```
+
+<Reveal label="Show what happens">
+
+**What the customer sees:** the page itself still loads, because the frontend is
+a separate program and it's still running. But every action fails. "It loads
+but nothing works" is the classic sign of this break.
+
+**What you see:** two different kinds of failure, and the difference matters.
+
+- **Port 8000 directly:** `curl` can't connect at all. Nobody is listening on
+  that door.
+- **Through the front door (5173):** the frontend *is* listening, so you get an
+  answer: `500 Internal Server Error`. It's the frontend's proxy saying "I
+  couldn't reach the backend to pass this along".
+
+Watch out for that `500`. It normally means "the backend crashed while handling
+your request", but here **the backend never saw the request at all**. The error
+came from the go-between. A production proxy like Nginx would answer
+`502 Bad Gateway` instead, which says it more honestly: "the thing behind me
+didn't answer". When you see a `500`, always ask *who* sent it.
+
+</Reveal>
+
+So, a rule: **an error message means something answered.** A failure to
+connect means nothing is there. They point at different tiers.
+
+**Fix it:** `docker compose start backend`.
+
+### Reason it through: the ticket again
+
+Back to "SITE DOWN". Work **from the outside in**, one tier at a time, and
+stop at the first one that fails:
+
+1. **Does the front door answer?** Load the site. If the page itself won't
+   load, the problem is the frontend, or something in front of it (DNS, the
+   network, the customer's office firewall).
+2. **Does the kitchen answer?** Hit the health check. A connection failure
+   means the backend isn't running. Go to step 4.
+3. **What does the kitchen say about the fridge?** Read the JSON. `db: false` or
+   `redis: false` names the broken part directly.
+4. **What does Docker say?** `docker compose ps` shows what's running, and
+   whether it's healthy or just "Up".
+5. **What did the broken part say before it stopped?**
+   `docker compose logs --tail=40 backend` (or `db`, or `redis`). A program
+   that crashed usually printed its last words there.
+
+**Why this failure mode is dangerous:** "the site is down" sends people
+straight to the scariest explanation. Most of the time, one part is down and the
+rest is fine, and the health check will tell you which part in one line.
+
+### Check yourself
+
+<Quiz
+  question="A customer says the page loads, but every button gives an error. On port 8000 the health check can't connect at all. Which part is down?"
+  options={[
+    "The frontend",
+    "The backend",
+    "The database",
+    "The customer's own network",
+  ]}
+  answer={1}
+>
+The page loads, so the frontend is fine and the customer can reach you. Nothing
+answers on 8000, so the backend isn't running. If only the database were down,
+the backend would still answer and report db: false.
+</Quiz>
+
+<Quiz
+  question='The health check answers, and says {"status":"degraded","db":true,"redis":false}. What do you check next?'
+  options={[
+    "Restart the backend",
+    "Look at Redis: docker compose ps, then its logs",
+    "Look at the database",
+  ]}
+  answer={1}
+>
+The backend answered, so it's running. It names the broken part for you:
+redis: false. Go straight there. Restarting the backend wouldn't fix Redis.
+</Quiz>
+
+<Quiz
+  question="Through the front door (port 5173) you get 500 Internal Server Error, but port 8000 won't connect at all. Who sent the 500?"
+  options={[
+    "The backend, because it crashed",
+    "The frontend's proxy, because it couldn't reach the backend",
+    "The database",
+  ]}
+  answer={1}
+>
+Nothing is listening on 8000, so the backend can't have sent anything. The only
+thing that answered was the go-between on 5173. A production proxy would say
+502 Bad Gateway, which is clearer.
+</Quiz>
+
+## Trade-offs & decisions
+
+**Containers instead of installing everything on your laptop.** Installing
+Postgres, Redis, Python and Node directly is faster to run, but fragile:
+different versions on every machine, and nothing that transfers to production.
+Containers add a layer to learn and run a bit slower on a Mac. In return, one
+command gives everyone the same system, and the same boxes move to the cloud
+later. Full record:
+[`docs/adr/0001-local-first-docker-compose.md`](../../docs/adr/0001-local-first-docker-compose.md).
+
+**A health check that checks the dependencies, not just itself.** It costs a
+tiny database query on every check, and it's worth it. A check that always says
+"OK" will cheerfully report a healthy system while every customer gets errors.
+
+**Wait for "healthy", not "started".** `depends_on: service_healthy` makes the
+first startup a few seconds slower. In return, the backend never boots into a
+database that isn't ready yet.
+
+**Settings in `.env`, not in the code.** The code is the same everywhere; only
+the settings change between your laptop and production. And passwords never end
+up in git.
+
+## What actually broke for me
+
+**The database couldn't get its port.** The first `docker compose up` failed to
+start `db`, because door 5432 on the Mac was already taken. Something else
+(usually a Postgres installed directly on the machine, or another project's
+container) got there first. The message is Docker's standard one for this:
+
+```
+Error response from daemon: Ports are not available: exposing port TCP 0.0.0.0:5432 -> 0.0.0.0:0: listen tcp 0.0.0.0:5432: bind: address already in use
+```
+
+*(That text is Docker's standard wording, written down after the fact. The
+original scrollback wasn't kept.)*
+
+The fix only changes the **laptop** side of the door:
+
+```yaml
+ports: ["5433:5432"]
+```
+
+Inside Docker, the backend still reaches the database on 5432, so nothing in the
+app changed. Only tools on the Mac itself, like `psql` or a database GUI, now
+connect on 5433. To find out who's holding a port before changing anything:
+
+```bash
+lsof -i :5432
+```
+
+**The container user had no home folder.** For safety, the backend runs as a
+limited user called `app`, not as the all-powerful `root`. The line that created
+that user didn't give it a home folder, so any tool that tried to save a file
+"in your home folder" failed. The fix was one letter, `-m` ("make home"):
+
+```dockerfile
+RUN groupadd -r app && useradd -r -g app -m app
+```
+
+Lesson: "works on my laptop, fails in the container" is very often a missing
+folder or a permissions problem, not a code problem.
+
+## Production reality check
+
+What this lab does that a real company wouldn't. The full list is in
+[`docs/known-gaps.md`](../../docs/known-gaps.md).
+
+- 🔴 **The secret key has a default value.** Django signs login cookies with
+  `SECRET_KEY`. If it's missing, Deskly falls back to a public placeholder.
+  Anyone who knows the key could forge a login. Production refuses to start
+  without a real one. (GAP-001)
+- 🟠 **Debug mode is on by default.** A crash shows a detailed error page with
+  source code and settings: helpful to you, and to an attacker. (GAP-002)
+- 🟠 **Passwords live in a plain `.env` file.** Fine on a laptop. Production uses
+  a proper secrets store with access logs. (GAP-003)
+- 🟡 **The database is reachable from your laptop on port 5433.** Handy for
+  poking at it. In production the database has no public door at all. (GAP-005)
+- 🟡 **"Degraded" still returns `200 OK`.** The health check *says* `degraded` in
+  its JSON, but the HTTP status code is still `200`, which means "all good". Many
+  load balancers and monitoring tools only read the status code. They'd keep
+  sending customers to a backend that can't reach its database. Production
+  returns a failure code (usually `503`) when a dependency is down. (GAP-012)
+
+## Support takeaways
+
+**"The site is down": check in this order.**
+
+1. **Is it everyone, or just them?** Try the site yourself. If it works for you,
+   the problem is probably on their side: their network, VPN or browser.
+2. **Does the page load at all?** No page means the front door or something in
+   front of it. A page with nothing working inside it means a tier behind the
+   frontend.
+3. **What does the health check say?** It names the broken dependency in one
+   line.
+4. **Is it down, or just slow?** A request that hangs is a different problem
+   from one that fails straight away. Ask the customer which.
+5. **Read the logs of the part that failed.** The last lines before a crash
+   usually say why.
+
+**Questions to ask the customer:** Does the page load at all, or is it a blank
+screen? What exactly happens when you click: an error message, or endless
+loading? Is it everyone in your office, or just you? When did it start? Can you
+send a screenshot of any error?
+
+**When to escalate:** when the health check itself shows a dependency down
+(`db: false`), or the backend isn't answering at all. Those are infrastructure
+problems, not something to fix from a support seat. Include the health check
+output in the escalation: it saves the on-call engineer the first five minutes.
+
+## Next
+
+[Lesson 1](01-whose-data-is-this.mdx) puts real data into the database, and
+deals with the scariest ticket in SaaS: *"I can see another company's data."*
