@@ -42,5 +42,16 @@ services:
     ports: ["5173:5173"]
     depends_on: [backend]
 
+  # The course website. Not part of the app, so it only starts when asked for:
+  #   make site   (or: docker compose --profile site up site)
+  site:
+    profiles: ["site"]
+    build: ./site
+    volumes:
+      - ./site:/site
+      - /site/node_modules
+      - ./content:/content
+    ports: ["4321:4321"]
+
 volumes:
   pgdata:

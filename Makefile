@@ -1,4 +1,4 @@
-.PHONY: up down logs migrate sh test seed
+.PHONY: up down logs migrate sh test seed site
 
 up:
 	docker compose up --build
@@ -23,3 +23,6 @@ seed:
 
 exec:
 	docker compose exec backend python manage.py shell
+
+site:
+	docker compose --profile site up --build site

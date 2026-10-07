@@ -30,6 +30,7 @@ scaling consequence, and anything where you seriously considered an alternative.
 |---|---|---|---|
 | [0001](0001-local-first-docker-compose.md) | Local-first stack on Docker Compose | Accepted | 0 |
 | [0002](0002-tenant-column-isolation.md) | Shared database with a tenant column | Accepted (implementation pending) | 1 |
+| [0003](0003-astro-course-site.md) | One Astro site, inside the repo, for the course and articles | Accepted | — |
 
 ## Statuses
 

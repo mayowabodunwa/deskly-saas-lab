@@ -1,0 +1,27 @@
+---
+import Base from "../layouts/Base.astro";
+import { getLessons, getArticles } from "../lib/content";
+
+const lessons = await getLessons();
+const articles = await getArticles();
+---
+
+<Base title="Support Engineering by Building Systems" description="Learn how software systems work by building one, breaking it on purpose, and diagnosing it the way a real ticket arrives.">
+  <section class="hero">
+    <h1>Support Engineering by Building Systems</h1>
+    <p class="lede">
+      Learn how software systems actually work by building one, breaking it on
+      purpose, and diagnosing it the way a real ticket arrives.
+    </p>
+    <a class="button" href="/course/">Start the course</a>
+  </section>
+
+  <h2>Course</h2>
+  <p>{lessons.length} lesson{lessons.length === 1 ? "" : "s"} so far, each built around a real support ticket.</p>
+  <a href="/course/">See all lessons →</a>
+
+  <h2>Articles</h2>
+  {articles.length === 0
+    ? <p class="muted">No articles yet.</p>
+    : <ul class="card-list">{articles.map((a) => <li><a href={`/articles/${a.id}/`}>{a.data.title}</a></li>)}</ul>}
+</Base>

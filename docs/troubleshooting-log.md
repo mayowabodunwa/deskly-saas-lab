@@ -27,6 +27,73 @@ character.
 
 ---
 
+## 2026-10-07 — `GOTCHA` — Tooling / Site — `make site` did nothing, because a folder is called `site`
+
+**Symptom**
+
+```
+$ make -n site
+make: `site' is up to date.
+```
+
+The target existed and its recipe was correct, yet Make refused to run it.
+
+**What it means**
+Make was built to produce **files**. A target's name is, by default, the name of
+the file it creates. When a file or folder with that name already exists, Make
+decides the work is done and skips it. The `site/` folder made the `site` target
+look finished before it ever ran.
+
+**Root cause**
+`site` was missing from the `.PHONY` line, which is the list of targets that are
+command names, not files.
+
+**Fix**
+
+```make
+.PHONY: up down logs migrate sh test seed site
+```
+
+**Lesson**
+Any Make target that shares a name with a folder (`site`, `docs`, `test`,
+`build`) must be in `.PHONY`, or it silently stops working the day that folder
+appears. `make -n <target>` shows what would run, without running it.
+
+---
+
+## 2026-10-07 — `ERROR` — Tooling / Site — Astro 7 rejected a remark plugin
+
+**Symptom**
+First `astro build` of the course site:
+
+```
+`markdown.remarkPlugins`, `markdown.rehypePlugins`, and `markdown.remarkRehype` run on the `unified` processor from `@astrojs/markdown-remark`, which is no longer installed by default now that Sätteri is the default Markdown processor. Install it with:
+  npm install @astrojs/markdown-remark
+```
+
+**What it means**
+Astro 7 switched its default Markdown engine to a new one (Sätteri). Plugins
+written for the old engine (remark) need that engine installed on purpose.
+
+**Root cause**
+The site uses a small remark plugin to rewrite lesson links
+(`site/src/lib/remark-lesson-links.mjs`). Most guides and examples online still
+assume remark is built in.
+
+**Fix**
+Exactly what the message says:
+
+```bash
+npm install @astrojs/markdown-remark
+```
+
+**Lesson**
+A good error message is the fix. Read the whole thing before searching. Also,
+pin major versions in `package.json`: tutorials lag behind releases, and a new
+major version changes defaults.
+
+---
+
 ## 2026-10-07 — `ERROR` — Phase 1 / GAP-007 — the shell said fixed, the tests said `ValueError`
 
 **Symptom**

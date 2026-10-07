@@ -1,0 +1,33 @@
+---
+// Tick boxes for "I ran this" steps. Ticks are remembered in this browser.
+// `id` must be unique across the whole course, e.g. "l0-verify".
+interface Props {
+  id: string;
+  items: string[];
+}
+const { id, items } = Astro.props;
+---
+
+<ul class="checklist" data-checklist={id}>
+  {items.map((item, i) => (
+    <li>
+      <label>
+        <input type="checkbox" data-check={`${id}:${i}`} />
+        <span set:html={item} />
+      </label>
+    </li>
+  ))}
+</ul>
+
+<script>
+  import { load, save } from "../lib/progress";
+  const progress = load();
+  for (const box of document.querySelectorAll<HTMLInputElement>("[data-check]")) {
+    const key = box.dataset.check!;
+    box.checked = !!progress.checks[key];
+    box.addEventListener("change", () => {
+      progress.checks[key] = box.checked;
+      save(progress);
+    });
+  }
+</script>

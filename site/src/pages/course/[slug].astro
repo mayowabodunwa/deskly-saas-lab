@@ -1,0 +1,35 @@
+---
+import { render } from "astro:content";
+import Base from "../../layouts/Base.astro";
+import LessonComplete from "../../components/LessonComplete.astro";
+import { getLessons } from "../../lib/content";
+
+export async function getStaticPaths() {
+  const lessons = await getLessons();
+  return lessons.map((lesson, i) => ({
+    params: { slug: lesson.id },
+    props: { lesson, prev: lessons[i - 1], next: lessons[i + 1] },
+  }));
+}
+
+const { lesson, prev, next } = Astro.props;
+const { Content } = await render(lesson);
+---
+
+<Base title={lesson.data.title} description={lesson.data.description}>
+  <article class="prose">
+    <p class="eyebrow">
+      Lesson {lesson.data.lesson}
+      {lesson.data.draft && <span class="badge">Draft</span>}
+    </p>
+    <h1>{lesson.data.title.replace(/^Lesson \d+:\s*/, "")}</h1>
+    <Content />
+    <LessonComplete id={lesson.id} />
+  </article>
+
+  <nav class="pager">
+    {prev ? <a href={`/course/${prev.id}/`}>← Lesson {prev.data.lesson}</a> : <span />}
+    <a href="/course/">All lessons</a>
+    {next ? <a href={`/course/${next.id}/`}>Lesson {next.data.lesson} →</a> : <span />}
+  </nav>
+</Base>

@@ -1,0 +1,46 @@
+---
+import Base from "../../layouts/Base.astro";
+import { getLessons } from "../../lib/content";
+
+const lessons = await getLessons();
+---
+
+<Base title="Course" description="Every lesson opens with a real support ticket, builds the part of the system it's about, then breaks it on purpose.">
+  <h1>The course</h1>
+  <p class="lede">
+    Every lesson opens with a real support ticket, builds the part of the system
+    it's about, breaks it on purpose, and ends with what to check first next time.
+  </p>
+  <p class="progress-summary" data-total={lessons.length} hidden></p>
+
+  <ol class="lesson-list">
+    {lessons.map((lesson) => (
+      <li data-lesson={lesson.id}>
+        <a href={`/course/${lesson.id}/`}>
+          <span class="lesson-number">Lesson {lesson.data.lesson}</span>
+          <span class="lesson-title">{lesson.data.title.replace(/^Lesson \d+:\s*/, "")}</span>
+          <span class="lesson-ticket">“{lesson.data.ticket}”</span>
+        </a>
+        <span class="lesson-status">
+          {lesson.data.draft && <span class="badge">Draft</span>}
+          <span class="badge done-badge" hidden>✓ Done</span>
+        </span>
+      </li>
+    ))}
+  </ol>
+</Base>
+
+<script>
+  import { load } from "../../lib/progress";
+  const progress = load();
+  let done = 0;
+  for (const item of document.querySelectorAll<HTMLElement>("[data-lesson]")) {
+    if (progress.lessons[item.dataset.lesson!]) {
+      item.querySelector<HTMLElement>(".done-badge")!.hidden = false;
+      done++;
+    }
+  }
+  const summary = document.querySelector<HTMLElement>(".progress-summary")!;
+  summary.textContent = `You've completed ${done} of ${summary.dataset.total} lessons.`;
+  summary.hidden = done === 0;
+</script>

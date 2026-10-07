@@ -1,0 +1,43 @@
+---
+// A single multiple-choice question with instant feedback.
+// Usage:
+//   <Quiz question="..." options={["a", "b", "c"]} answer={1}>
+//     Why b is right, shown after any answer.
+//   </Quiz>
+interface Props {
+  question: string;
+  options: string[];
+  answer: number; // index into options, starting at 0
+}
+const { question, options, answer } = Astro.props;
+---
+
+<div class="quiz" data-answer={answer}>
+  <p class="quiz-question"><strong>Quick check:</strong> {question}</p>
+  <div class="quiz-options">
+    {options.map((option, i) => (
+      <button type="button" class="quiz-option" data-index={i}>{option}</button>
+    ))}
+  </div>
+  <p class="quiz-result" aria-live="polite"></p>
+  <div class="quiz-explain" hidden><slot /></div>
+</div>
+
+<script>
+  for (const quiz of document.querySelectorAll<HTMLElement>(".quiz")) {
+    const answer = Number(quiz.dataset.answer);
+    const result = quiz.querySelector<HTMLElement>(".quiz-result")!;
+    const explain = quiz.querySelector<HTMLElement>(".quiz-explain")!;
+    for (const button of quiz.querySelectorAll<HTMLButtonElement>(".quiz-option")) {
+      button.addEventListener("click", () => {
+        const right = Number(button.dataset.index) === answer;
+        quiz.querySelectorAll(".quiz-option").forEach((b) => b.classList.remove("picked"));
+        button.classList.add("picked");
+        quiz.classList.toggle("right", right);
+        quiz.classList.toggle("wrong", !right);
+        result.textContent = right ? "Right." : "Not quite. Try another, or read why below.";
+        explain.hidden = false;
+      });
+    }
+  }
+</script>
