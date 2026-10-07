@@ -171,7 +171,36 @@ frames the Phase 1 article.
 
 ---
 
-## 🟠 GAP-007 — `Comment.organization` can drift from `comment.ticket.organization`
+## ✅ GAP-007 (closed 2026-10-07) — `Comment.organization` could drift from `comment.ticket.organization`
+
+**Closed by:** `Comment.save()` now copies the organization from the ticket on
+every save, ignoring whatever the caller passed:
+
+```python
+def save(self, *args, **kwargs):
+    self.organization = self.ticket.organization
+    super().save(*args, **kwargs)
+```
+
+**Evidence:** the drift was reproduced first: in the Django shell, a comment
+created with `organization=acme` on Globex's ticket saved without complaint and
+was counted by **both** `Comment.objects.for_org(acme)` and
+`globex_ticket.comments`. After the fix, the same call produced a comment owned
+by `globex`. `test_comment_takes_its_org_from_its_ticket` in
+`backend/apps/tickets/tests.py` asserts it, and was made to fail by commenting
+out the copy line (`FAILED (failures=1)`) before being trusted.
+
+**Design choice: overwrite, not reject.** A stricter version raised `ValueError`
+on a mismatch. The overwrite was chosen because it matches the rule Slice 3 set
+for tickets: the tenant comes from the parent (URL or ticket), never from the
+caller. The cost is that a caller passing the wrong org is silently corrected
+rather than told, so a bug upstream goes unnoticed.
+
+**Not covered:** `save()` only runs when Django saves one object. Bulk paths
+skip it. Tracked as GAP-010.
+
+The original entry is kept below, unedited.
+
 
 **Where:** `backend/apps/tickets/models.py`
 
@@ -267,6 +296,49 @@ behind "the import said it failed but some of the records are there."
 data someone cares about — a shared staging database, or anything beyond one
 developer's laptop. Also close it immediately if a write is ever added that is
 **not** idempotent, since the re-run repair strategy stops working at that point.
+
+---
+
+## 🟡 GAP-010 — The comment/ticket org rule lives in Python, not in the database
+
+**Where:** `backend/apps/tickets/models.py`, in `Comment.save()`
+
+GAP-007 was closed in application code. `save()` runs when Django saves **one
+object**. It does **not** run for:
+
+- `Comment.objects.filter(...).update(ticket=other_ticket)`: moves comments to
+  another ticket and leaves their old `organization` behind. That is exactly the
+  drift GAP-007 described.
+- `Comment.objects.bulk_create([...])`: inserts many rows in one statement.
+- raw SQL, `psql`, or any other program writing to the same database.
+
+Postgres itself still accepts a mismatched row.
+
+**What production does:** puts the rule in the database, so no code path can
+skip it. The usual pattern is a **composite foreign key**: make
+`(id, organization_id)` unique on tickets, then have comments point at that
+*pair*, so a comment can only reference a ticket in its own org:
+
+```sql
+ALTER TABLE tickets_ticket
+  ADD CONSTRAINT ticket_id_org_uniq UNIQUE (id, organization_id);
+ALTER TABLE tickets_comment
+  ADD CONSTRAINT comment_ticket_same_org
+  FOREIGN KEY (ticket_id, organization_id)
+  REFERENCES tickets_ticket (id, organization_id);
+```
+
+Django 5.1 cannot declare a multi-column foreign key in a model, so this would
+be a `migrations.RunSQL` migration. The alternative is a trigger.
+
+**Why it matters:** an application-level rule protects the paths you remember.
+The first bulk "move these comments" admin script or data fix quietly creates
+the cross-tenant comment that GAP-007 was about. No error is raised, so the
+symptom is a customer reporting a reply they didn't write.
+
+**Trigger to close:** before any code calls `update()` or `bulk_create()` on
+comments, or any data-fix script touches `tickets_comment`. Also close it before
+the first real tenant.
 
 ---
 

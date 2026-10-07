@@ -320,7 +320,8 @@ fields they were given.
   `organization_detail` today would have to assert `200 OK` for any caller —
   pinning GAP-006 in place and making it read as intentional. Phase 2 writes
   that test asserting `403`, and it going green is how GAP-006 closes.
-- **Comment org drift (GAP-007).** Still open.
+- **Comment org drift (GAP-007).** Still open when Slice 5 closed. Fixed and
+  tested afterwards; see the GAP-007 section below.
 
 **Tests never run against live code.** `manage.py test` creates a separate
 `test_deskly` database, runs, and destroys it — the seeded Acme and Globex rows
@@ -328,6 +329,63 @@ are never touched. Tests answer *"would this break?"* before a deploy; health
 checks like `/api/health/` answer *"is it broken now?"* continuously, after one.
 Both matter, and a leak is firmly a question for the first kind: once it is live,
 the damage is already done and no health check will report it.
+
+### GAP-007 — a comment's company comes from its ticket
+
+A `Comment` records its company twice: in its own `organization` column, and
+through `comment.ticket.organization`. The extra column exists for speed, so
+"all of Acme's comments" is a simple filter with no join through tickets. The
+risk is that the two copies can disagree.
+
+Think of a filing cabinet. Each ticket is a folder with a company on the tab.
+Each comment is a sheet inside a folder, and the sheet *also* has a company
+stamped on it. Nothing stopped a sheet stamped "Acme" from going into the Globex
+folder.
+
+**Break it first.** In the Django shell, before any fix:
+
+```python
+bad = Comment.objects.create(organization=acme, ticket=globex_ticket, body="Who owns me?")
+Comment.objects.for_org(acme).count()   # 1
+globex_ticket.comments.count()          # 1
+```
+
+No error. One comment, counted by **both** companies. Acme's comment list shows
+a reply that is really part of Globex's private conversation. That is a
+cross-tenant leak, and the database accepted it.
+
+**The fix.** `Comment.save()` always copies the company from the ticket:
+
+```python
+def save(self, *args, **kwargs):
+    self.organization = self.ticket.organization
+    super().save(*args, **kwargs)
+```
+
+`super().save(...)` runs Django's normal save. Writing your own `save()` replaces
+Django's, so without that line nothing would reach the database. No migration
+was needed: no column changed, only what happens before a save.
+
+**Overwrite or reject?** Two versions were tried:
+
+- **Reject** (strict guard): raise `ValueError` when the stamp doesn't match the
+  folder. Mistakes are loud, but every caller must get the org right or crash.
+- **Overwrite** (quiet fixer): ignore the caller's org and take the ticket's.
+  Always saves, always correctly.
+
+Overwrite was chosen because it matches Slice 3: a POST carrying another org's
+id is *ignored*, not refused. The tenant always comes from the parent (the URL
+for tickets, the ticket for comments), never from what the caller typed. The
+cost is that a wrong org upstream is corrected silently instead of reported.
+
+**The test.** `test_comment_takes_its_org_from_its_ticket` asks for Acme on a
+Globex ticket and asserts the comment is Globex's. It was broken on purpose by
+commenting out the copy line, which gave `FAILED (failures=1)`, then restored.
+
+**What it does not cover (GAP-010).** `save()` runs only when Django saves one
+object. `QuerySet.update()`, `bulk_create()` and raw SQL all skip it, and
+Postgres would still accept a mismatched row. Production moves this rule into
+the database with a composite foreign key.
 
 ## Build slices
 
@@ -360,6 +418,11 @@ the damage is already done and no health check will report it.
       deliberately before being trusted; breaking `views.py` alone turned the
       suite `.F`, proving the HTTP test catches what the model test cannot.
       Authorization is still out of scope until Phase 2 (GAP-006).
+- [x] Follow-up — GAP-007: a comment's org always comes from its ticket.
+      **Verified 2026-10-07**: drift reproduced in the shell (one comment
+      counted by both orgs), fixed in `Comment.save()`, and guarded by a fourth
+      test that was made to fail before being trusted. Bulk paths that skip
+      `save()` are tracked as GAP-010.
 
 ## How to verify (target)
 
@@ -465,6 +528,27 @@ docker compose exec backend python manage.py test apps.tickets.tests.TenantIsola
 #   views.py  line 25 : for_org(organization) -> .all()     expect .F, API leaks
 ```
 
+```bash
+# GAP-007 — comment org drift
+make exec                                  # docker compose exec backend python manage.py shell
+```
+
+```python
+# reproduce: a comment stamped Acme on a Globex ticket
+acme = Organization.objects.get(slug="acme")
+globex_ticket = Ticket.objects.get(subject__startswith="Globex merger")
+bad = Comment.objects.create(organization=acme, ticket=globex_ticket, body="Who owns me?")
+Comment.objects.for_org(acme).count()      # before the fix: 1
+globex_ticket.comments.count()             # before the fix: 1 (same comment)
+bad.organization.slug                      # after the fix: 'globex'
+bad.delete()                               # don't leave test rows in demo data
+```
+
+```bash
+# prove the test can fail: comment out the copy line in Comment.save()
+make test                                  # expect FAILED (failures=1), then revert -> OK
+```
+
 ## Gotchas
 
 - **`curl: (52) Empty reply from server`** → the server is *dead*, not unhappy.
@@ -546,3 +630,16 @@ docker compose exec backend python manage.py test apps.tickets.tests.TenantIsola
 - **`Found N test(s)` counts the whole project.** An empty `tests.py` in another
   app contributes zero silently — "no tests ran for that app" and "that app has
   no tests" look identical from the outside.
+- **Storing the tenant twice means two answers can disagree.** A copy of
+  `organization` on a child row is a speed trade. It needs a rule that keeps it
+  in step with the parent, or the "fast" filter and the "correct" join return
+  different rows.
+- **Writing your own `save()` replaces Django's.** Forget
+  `super().save(*args, **kwargs)` and nothing is written, with no error.
+- **`save()` is not a database rule.** `update()`, `bulk_create()` and raw SQL
+  skip it. If something must *never* happen, the database has to enforce it
+  (GAP-010).
+- **The Django shell reads your code once, at startup.** Edit `models.py` and
+  the open shell keeps running the old version, while `make test` reads the file
+  fresh. When the shell and the tests disagree, believe the tests and restart
+  the shell.

@@ -27,6 +27,108 @@ character.
 
 ---
 
+## 2026-10-07 — `ERROR` — Phase 1 / GAP-007 — the shell said fixed, the tests said `ValueError`
+
+**Symptom**
+In the Django shell, the fix looked done: a comment created with
+`organization=acme` on Globex's ticket printed `'globex'` for
+`bad.organization.slug`. The new test then errored:
+
+```
+ERROR: test_comment_takes_its_org_from_its_ticket (apps.tickets.tests.TenantIsolationTests.test_comment_takes_its_org_from_its_ticket)
+  File "/app/apps/tickets/models.py", line 68, in save
+    raise ValueError(
+ValueError: A comment's organization must match its ticket's organization.
+
+Ran 4 tests in 0.013s
+
+FAILED (errors=1)
+```
+
+**What it means**
+Two versions of `Comment.save()` had been written: a strict one that raises on a
+mismatch, and a short one that overwrites. The test was written for the short
+one. The file on disk held the strict one. The traceback says so directly: the
+last frame is `models.py, line 68, in save` → `raise ValueError`.
+
+This is an `E` (error), not an `F` (failure): the test crashed inside `create()`
+and never reached its `assertEqual`.
+
+**Root cause**
+The code saved in `models.py` was not the code the shell had run. A Django shell
+imports `models.py` once, when it starts, so an open shell keeps running whatever
+version existed at that moment. `make test` starts a fresh process and reads the
+file as it is now. Exactly how the two diverged (an editor undo, or a save that
+landed after the shell started) wasn't pinned down. The traceback settled what
+was actually on disk.
+
+**Fix**
+Replaced the method in `models.py` with the two-line overwrite version. Re-ran:
+`Ran 4 tests` → `OK`.
+
+**Lesson**
+When the shell and the test suite disagree, trust the tests. They read the file
+fresh. And read the **last frame** of a traceback first: it names the file and
+line that actually ran.
+
+*Support angle:* "I deployed the fix but it still happens" is very often this:
+a long-running process (a shell, a worker, a server that never restarted) still
+holding the old code in memory.
+
+---
+
+## 2026-10-07 — `GOTCHA` — Phase 1 / GAP-007 — one comment, two owners, no error
+
+**Symptom**
+In the Django shell:
+
+```python
+bad = Comment.objects.create(organization=acme, ticket=globex_ticket, body="Who owns me?")
+Comment.objects.for_org(acme).count()   # 1
+globex_ticket.comments.count()          # 1
+```
+
+The `create` raised nothing. The same single comment was counted by Acme and by
+Globex.
+
+**What it means**
+The comment answers "whose is this?" in two places that disagree. Its own
+`organization` column says Acme. Its ticket says Globex. Code that filters by
+the column (Acme's comment list) shows Acme a reply from inside Globex's private
+conversation.
+
+**Root cause**
+`Comment.organization` is a copy of `ticket.organization`, kept so comment
+queries can filter by tenant without a join. Nothing in the model or the
+database forced the copy to match the original.
+
+**Fix**
+`Comment.save()` now overwrites the org with the ticket's on every save:
+
+```python
+def save(self, *args, **kwargs):
+    self.organization = self.ticket.organization
+    super().save(*args, **kwargs)
+```
+
+Re-running the same `create` gives a comment owned by `globex`. A fourth test,
+`test_comment_takes_its_org_from_its_ticket`, guards it. Commenting out the copy
+line turned it red before it was trusted. The bad row from the demo was deleted
+by hand, because the fix stops new drift but doesn't repair rows that already
+exist.
+
+**Lesson**
+Every time you store the same fact twice, you've created a way for the two
+copies to disagree. Either enforce that they match, or don't duplicate. And an
+app-level rule only guards the paths that call it: `update()`, `bulk_create()`
+and raw SQL skip `save()` (GAP-010).
+
+*Support angle:* "I can see a reply on my ticket that nobody here wrote" is the
+customer-side shape of this bug. No error appears in any log, because the
+database was happy to store it.
+
+---
+
 ## 2026-09-20 — `ERROR` — Tooling / CI — a token that can push code cannot push workflows
 
 **Symptom**
