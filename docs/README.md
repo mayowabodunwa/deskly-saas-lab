@@ -21,15 +21,15 @@ architectural choices (think lightweight ADRs — Architecture Decision Records)
 
 ## Repository
 
-- GitHub: `cloudsenseiNG/deskly-saas-lab` (private)
+- GitHub: `mayowabodunwa/deskly-saas-lab` (private)
 
 ## Phase index
 
 | Phase | Notes | Status |
 |-------|-------|--------|
 | 0 — Foundation | [phase-0-foundation.md](phase-0-foundation.md) | ✅ Verified |
-| 1 — Domain model & multi-tenancy | [phase-1-domain-multitenancy.md](phase-1-domain-multitenancy.md) | 🚧 In progress |
-| 2 — Auth (sessions + JWT + OAuth + RBAC) | _to write_ | ⬜ Not started |
+| 1 — Domain model & multi-tenancy | [phase-1-domain-multitenancy.md](phase-1-domain-multitenancy.md) | ✅ Verified |
+| 2 — Auth (sessions + JWT + OAuth + RBAC) | [phase-2-auth.md](phase-2-auth.md) | 🚧 In progress |
 | 3 — Admin, impersonation & feature flags | _to write_ | ⬜ Not started |
 | 4 — Async: Celery exports & scheduled email | _to write_ | ⬜ Not started |
 | 5 — AI: in-app assistant + MCP server | _to write_ | ⬜ Not started |
