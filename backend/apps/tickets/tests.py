@@ -2,7 +2,7 @@ from django.test import TestCase
 
 from apps.organizations.models import Organization
 
-from .models import Ticket
+from .models import Comment, Ticket
 
 
 class TenantIsolationTests(TestCase):
@@ -19,7 +19,6 @@ class TenantIsolationTests(TestCase):
 
     def test_ticket_list_endpoint_is_scoped_to_the_url_org(self):
         response = self.client.get("/api/orgs/acme/tickets/")
-
         self.assertEqual(response.status_code, 200)
         subjects = [ticket["subject"] for ticket in response.json()]
         self.assertEqual(subjects, ["Printer won't work"])
@@ -30,7 +29,13 @@ class TenantIsolationTests(TestCase):
             {"subject": "Planted", "organization": self.globex.id},
             content_type="application/json",
         )
-
         self.assertEqual(response.status_code, 201)
         planted = Ticket.objects.get(subject="Planted")
-        self.assertEqual(planted.organization, self.acme)        
+        self.assertEqual(planted.organization, self.acme)   
+
+    def test_comment_takes_its_org_from_its_ticket(self):
+        globex_ticket = Ticket.objects.get(subject="Globex merger plans")
+        comment = Comment.objects.create(
+            organization=self.acme, ticket=globex_ticket, body="Who owns me?"
+        )
+        self.assertEqual(comment.organization, self.globex)            

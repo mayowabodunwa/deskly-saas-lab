@@ -61,5 +61,9 @@ class Comment(models.Model):
     class Meta:
         ordering = ["created_at"]
 
+    def save(self, *args, **kwargs):
+        self.organization = self.ticket.organization
+        super().save(*args, **kwargs)
+
     def __str__(self):
         return f"Comment on ticket {self.ticket_id}"
