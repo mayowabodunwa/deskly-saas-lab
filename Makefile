@@ -20,3 +20,6 @@ test:
 
 seed:
 	docker compose exec backend python manage.py seed_demo
+
+exec:
+	docker compose exec backend python manage.py shell
