@@ -9,8 +9,3 @@ export async function getLessons() {
   const all = await getCollection("course", ({ data }) => showDrafts || !data.draft);
   return all.sort((a, b) => a.data.lesson - b.data.lesson);
 }
-
-export async function getArticles() {
-  const all = await getCollection("articles", ({ data }) => showDrafts || !data.draft);
-  return all.sort((a, b) => b.data.pubDate.valueOf() - a.data.pubDate.valueOf());
-}

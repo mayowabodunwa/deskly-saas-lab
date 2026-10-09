@@ -149,13 +149,12 @@ pre { padding: 1rem; border-radius: 8px; overflow-x: auto; font-size: 0.88rem; l
 .lesson-complete.done button { background: var(--good-soft); color: var(--good); border-color: var(--good); }
 .pager { display: flex; justify-content: space-between; gap: 1rem; padding-top: 1rem; border-top: 1px solid var(--border); }
 
-/* Lists of lessons/articles */
-.lesson-list, .card-list { list-style: none; padding: 0; display: grid; gap: 0.75rem; }
-.lesson-list li, .card-list li {
+/* Lesson list */
+.lesson-list { list-style: none; padding: 0; display: grid; gap: 0.75rem; }
+.lesson-list li {
   display: flex; justify-content: space-between; gap: 1rem; align-items: flex-start;
   padding: 1rem; border: 1px solid var(--border); border-radius: 10px; background: var(--surface);
 }
-.card-list li { display: block; }
 .lesson-list a { display: grid; gap: 0.15rem; text-decoration: none; color: var(--text); }
 .lesson-number { font-size: 0.85rem; color: var(--muted); }
 .lesson-title { font-weight: 650; font-size: 1.1rem; color: var(--accent); }

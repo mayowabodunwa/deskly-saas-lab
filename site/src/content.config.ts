@@ -17,15 +17,4 @@ const course = defineCollection({
   }),
 });
 
-const articles = defineCollection({
-  loader: glob({ pattern: ["*.{md,mdx}", "!README.md", "!_*"], base: "../content/articles" }),
-  schema: z.object({
-    title: z.string(),
-    description: z.string(),
-    pubDate: z.coerce.date(),
-    tags: z.array(z.string()).default([]),
-    draft: z.boolean().default(true),
-  }),
-});
-
-export const collections = { course, articles };
+export const collections = { course };

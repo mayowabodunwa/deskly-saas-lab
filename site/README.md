@@ -1,15 +1,12 @@
 # Course website
 
 The website for **Support Engineering by Building Systems**, built with
-[Astro](https://docs.astro.build/). It has two sections:
+[Astro](https://docs.astro.build/). It serves the course: the lessons in
+`../content/course/NN-*.mdx`, in order, with their interactive parts.
 
-| Section | Reads from | What's there |
-|---|---|---|
-| **Course** | `../content/course/NN-*.mdx` | Lessons, in order, with interactive parts |
-| **Articles** | `../content/articles/*.md` | Standalone articles |
-
-The writing lives in `content/`, outside this folder, so it stays readable on
-GitHub. This folder is only the machinery that turns it into web pages.
+The lessons live in `content/course/`, outside this folder, so they stay
+readable on GitHub. This folder is only the machinery that turns them into web
+pages. The engineering notes in `docs/` are not published.
 
 ## Run it
 
@@ -23,7 +20,7 @@ your Mac. It doesn't start with `make up`: the site isn't part of the app.
 
 ## Drafts
 
-`draft: true` lessons and articles **show** while running `make site`, with a
+`draft: true` lessons **show** while running `make site`, with a
 "Draft" badge, and are **left out** of a real build. So nothing can be
 published by accident. To include drafts in a build (for a preview):
 

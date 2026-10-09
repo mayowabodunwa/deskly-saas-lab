@@ -1,6 +1,6 @@
 # ADR-0003 — One Astro site, inside the repo, for the course and articles
 
-- **Status:** Accepted
+- **Status:** Accepted, amended 2026-10-09 (Articles section removed; see the end)
 - **Date:** 2026-10-07
 - **Phase:** cross-cutting (course publishing)
 
@@ -67,3 +67,18 @@ runs in Docker under a Compose **profile**, so `make up` doesn't start it;
 | Hugo | Fast and a single program, but its templating is harder for a beginner, and adding interactive components is clumsier. |
 | In-browser terminals (real Docker per reader) | Needs paid servers per reader. The course deliberately has readers run the real system on their own machine. |
 | The site in its own repo | Considered and offered. The owner chose a folder inside Deskly so lessons and code stay together. |
+
+## Amendment — 2026-10-09: Articles section removed
+
+The Articles section came from a misreading. "A static generator for both
+articles and the course" was taken to mean a second kind of writing (blog
+posts). The owner meant the per-phase articles, which *are* the course
+lessons. With no articles planned, the section and `content/articles/` were
+removed, and the site now serves the course only.
+
+Publishing the engineering notes from `docs/` in that slot was offered,
+because it would fix the lesson links that 404 against the private repo. It was
+declined: the notes stay private working documents. **Those links still 404 for
+other readers** until the repo is public or the links change.
+
+The rest of this decision stands.
