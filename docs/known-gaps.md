@@ -419,5 +419,29 @@ Found while writing Lesson 0 (2026-10-07).
 
 ---
 
+## 🟠 GAP-013 — Login cookies are allowed over plain HTTP
+
+**Where:** `backend/config/settings.py` (no `SESSION_COOKIE_SECURE` or
+`CSRF_COOKIE_SECURE`)
+
+The `sessionid` and `csrftoken` cookies have no `Secure` flag, so the browser
+will send them over plain HTTP. That's needed locally, where Deskly runs on
+`http://localhost`.
+
+**What production does:** sets `SESSION_COOKIE_SECURE = True` and
+`CSRF_COOKIE_SECURE = True`, serves everything over HTTPS, and redirects HTTP
+to HTTPS. Then a login cookie never travels where someone on the same network
+could read it and log in as that person.
+
+**Why it matters:** whoever holds the `sessionid` *is* that user until the
+session ends. A cookie sent in the clear can be copied.
+
+**Trigger to close:** Phase 7, the first deploy anywhere that isn't
+`localhost`. Read both settings from the environment, so local stays HTTP.
+
+Found in Phase 2, Slice 1 (2026-10-11).
+
+---
+
 <!-- New gaps: assign the next GAP-NNN, pick a severity, and always fill in the
      trigger. A gap with no trigger becomes permanent by accident. -->

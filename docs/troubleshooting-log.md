@@ -27,6 +27,148 @@ character.
 
 ---
 
+## 2026-10-11 — `GOTCHA` — Auth — Running `make seed` logged every demo user out
+
+**Symptom**
+adam logged in and `/api/me/` returned him. After `make seed`, the same cookie
+got:
+
+```
+{"detail":"Authentication credentials were not provided."}
+```
+
+His password was still `deskly-demo`. Nothing about his account had changed on
+purpose.
+
+**What it means**
+His session was thrown away by the server. The cookie was fine; the server no
+longer accepted it.
+
+**Root cause**
+`seed_demo` called `user.set_password(DEMO_PASSWORD)` on every run. Each call
+makes a new hash with a new random salt, so the stored value changed even
+though the password didn't. Django stores a fingerprint of the password hash
+inside each session, and when that no longer matches, it treats it as a
+password change and logs the user out everywhere. That's a safety feature
+working as designed.
+
+**Fix**
+
+```python
+if not user.check_password(DEMO_PASSWORD):
+    user.set_password(DEMO_PASSWORD)
+    user.save()
+```
+
+Only a wrong password gets reset. Committed as `eed9e3e`.
+
+**Lesson**
+"I keep getting logged out" can come from something the user never touched:
+any script, import or migration that rewrites the password column, even with
+the same password.
+
+---
+
+## 2026-10-11 — `GOTCHA` — Auth — Anonymous `/api/me/` returned 403, not the expected 401
+
+**Symptom**
+Calling `/api/me/` with no cookie, I expected `401 Unauthorized`. Got:
+
+```
+HTTP/1.1 403 Forbidden
+{"detail":"Authentication credentials were not provided."}
+```
+
+**What it means**
+The status code says "I know who you are, and no". The body says "I don't know
+who you are". The body is right.
+
+**Root cause**
+With no `REST_FRAMEWORK` settings, DRF's login methods are session, then Basic.
+For anonymous requests it picks the status from the first method only. A real
+401 needs a `WWW-Authenticate` header, and session login has none, so DRF sends
+403. See the DRF docs section "Unauthorized and Forbidden responses".
+
+**Fix**
+None yet, on purpose. Slice 5 adds JWT, which does send
+`WWW-Authenticate: Bearer`; the order of the login methods will decide it then.
+
+**Lesson**
+Read the body, not just the number. A support engineer who stops at "403"
+checks permissions, when the person simply isn't logged in.
+
+---
+
+## 2026-10-11 — `GOTCHA` — Auth — A user created with `objects.create()` can never log in
+
+**Symptom**
+Deliberate break. After `User.objects.create(username="bob", password="deskly-demo")`,
+`authenticate(username="bob", password="deskly-demo")` returned `None`, while
+the same call for vera returned `<User: vera>`. In psql:
+
+```
+ username |                                         password
+----------+------------------------------------------------------------------------------------------
+ vera     | pbkdf2_sha256$870000$kZZCjJarO9n7X5gkYz55aN$g408XwR3MwbgT6Jo1CWPZazZnPo0DFeiJrysrVUgCkc=
+ bob      | deskly-demo
+```
+
+**What it means**
+bob's password was stored as plain text. Two failures at once: he can't log
+in, and anyone who can read the table can read his password.
+
+**Root cause**
+`objects.create()` writes whatever it's given into the column. Django expects
+`algorithm$rounds$salt$hash` there, can't read `deskly-demo` as a hash, and
+the check fails even with the right password.
+
+**Fix**
+
+```python
+bob.set_password("deskly-demo")
+bob.save()
+```
+
+Or create users with `User.objects.create_user(username, password=...)`, which
+calls `set_password()` for you.
+
+**Lesson**
+bob is right about his password; the account was created wrongly. From the
+database alone: every healthy password starts with an algorithm name. One that
+doesn't was written by a script, an import or a home-made admin tool.
+
+---
+
+## 2026-10-11 — `GOTCHA` — Tooling — "I can't see any users", while they were in the database
+
+**Symptom**
+After seeding, a query for users showed nothing. Checked from the backend: all
+five users were there.
+
+**What it means**
+The data was fine. The viewer was looking at a different copy.
+
+**Root cause**
+Not confirmed. The two likely ones: psql connected to the empty `postgres`
+database instead of `deskly`, or a psql or database tool on the Mac reaching
+the Mac's own Postgres on `localhost:5432` (there is one; see the port 5432
+clash from the concepts track).
+
+**Fix**
+
+```bash
+docker compose exec db psql -U deskly deskly
+```
+
+Runs psql inside the container and names the database. The prompt reads
+`deskly=#`.
+
+**Lesson**
+"I can't see it" often means "I'm looking at a different copy". Check where
+you're looking before you check what's there.
+
+---
+
 ## 2026-10-09 — `GOTCHA` — Tooling / Site — Starlight's sidebar was empty, with no error
 
 **Symptom**
