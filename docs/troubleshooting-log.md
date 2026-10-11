@@ -27,6 +27,55 @@ character.
 
 ---
 
+## 2026-10-09 — `GOTCHA` — Tooling / Site — Starlight's sidebar was empty, with no error
+
+**Symptom**
+After moving the course site onto Starlight, both lesson pages loaded fine,
+but the sidebar showed a "Course" heading with nothing under it. No warning and
+no error. The config looked right:
+
+```js
+sidebar: [{ label: "Course", items: [{ autogenerate: { directory: "course" } }] }],
+```
+
+**What it means**
+The automatic sidebar ran and matched **zero** lessons. An empty list is a
+valid result, so nothing complained.
+
+**Root cause**
+Starlight's `autogenerate` doesn't match pages by their URL (`/course/...`).
+It matches them by **file path**, measured from its usual folder,
+`src/content/docs/`. Our lessons live in `../content/course/`, so their paths
+start with `../content/course/`, and nothing started with `course/`.
+
+**Fix**
+
+```js
+autogenerate: { directory: "../content/course" }
+```
+
+**Lesson**
+"No results" and "broken" can look identical. When a list is unexpectedly
+empty, check what the filter is actually comparing against, not what you
+assume it compares. Here the URL and the file path were two different things
+that happened to look alike.
+
+The same migration also hit a loud error, which was the easier kind:
+
+```
+[AstroUserError] Invalid frontmatter props passed to the `<StarlightPage/>` component.
+  Hint:
+    pubDate: Expected type `"date"`, received `"Date"`
+    lesson: Required
+    phase: Required
+    ticket: Required
+```
+
+Starlight checks custom pages, like the home page, against the same schema as
+lessons. The lesson-only fields became optional.
+
+---
+
 ## 2026-10-07 — `GOTCHA` — Tooling / Site — `make site` did nothing, because a folder is called `site`
 
 **Symptom**

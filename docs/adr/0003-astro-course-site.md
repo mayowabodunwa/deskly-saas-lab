@@ -1,6 +1,6 @@
 # ADR-0003 — One Astro site, inside the repo, for the course and articles
 
-- **Status:** Accepted, amended 2026-10-09 (Articles section removed; see the end)
+- **Status:** Accepted, amended twice on 2026-10-09 (Articles removed; moved to Starlight; see the end)
 - **Date:** 2026-10-07
 - **Phase:** cross-cutting (course publishing)
 
@@ -82,3 +82,30 @@ declined: the notes stay private working documents. **Those links still 404 for
 other readers** until the repo is public or the links change.
 
 The rest of this decision stands.
+
+## Amendment — 2026-10-09: moved onto Starlight
+
+The owner asked for the site to follow standard course-site practice. Most of
+that (a lesson sidebar, "On this page" headings, search, a light/dark switch,
+callouts, a phone layout) is exactly what **Starlight**, Astro's official
+documentation theme, ships with and maintains. Building it by hand would mean
+maintaining it by hand. That reverses the "plain Astro" choice in the
+alternatives table above, which was right for a three-page site and wrong for
+a real course.
+
+What changed: Starlight owns routing and layout. Lessons load from
+`../content/course/` into Starlight's `docs` collection with a `course/` id
+prefix. Our components (Reveal, Quiz, Checklist, LessonComplete) carried over
+unchanged, restyled with Starlight's theme variables. Search is built by
+Pagefind at build time, so it doesn't work in the dev server.
+
+Added at the same time: the **ticket simulator**, a practice ticket where the
+reader chooses checks against a clock and sees real captured outputs. It's the
+course's signature interactive piece, aimed at exactly the skill the course
+teaches.
+
+Costs: Starlight's look is "documentation" unless customised, and it has its
+own conventions to learn. Two needed workarounds: the sidebar's
+`autogenerate.directory` must be the lessons' real path (`../content/course`),
+and the lesson-only frontmatter fields are optional in the schema, because
+Starlight validates the custom home page against it too.
