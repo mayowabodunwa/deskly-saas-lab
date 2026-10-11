@@ -44,8 +44,10 @@ class Command(BaseCommand):
         ]
         for username, org, role in people:
             user, _ = User.objects.get_or_create(username=username)
-            user.set_password(DEMO_PASSWORD)
-            user.save()
+            if not user.check_password(DEMO_PASSWORD):
+                user.set_password(DEMO_PASSWORD)
+                user.save()
+
             Membership.objects.update_or_create(
                 organization=org,
                 user=user,
