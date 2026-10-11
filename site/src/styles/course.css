@@ -1,0 +1,92 @@
+/* Styles for the course's own pieces. Colours come from Starlight's theme
+   variables, so everything follows the light/dark switch automatically. */
+
+.badge {
+  font-size: var(--sl-text-xs);
+  font-weight: 600;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  background: var(--sl-color-accent-low);
+  color: var(--sl-color-text-accent);
+  white-space: nowrap;
+}
+.done-badge { background: var(--sl-color-green-low); color: var(--sl-color-green-high); }
+
+/* Home page lesson list */
+.lesson-list { list-style: none; padding: 0; display: grid; gap: 0.75rem; }
+.lesson-list li {
+  display: flex; justify-content: space-between; gap: 1rem; align-items: flex-start;
+  padding: 1rem; margin: 0; border: 1px solid var(--sl-color-hairline); border-radius: 0.6rem;
+  background: var(--sl-color-bg-nav);
+}
+.lesson-list a { display: grid; gap: 0.15rem; text-decoration: none; color: var(--sl-color-text); }
+.lesson-number { font-size: var(--sl-text-sm); color: var(--sl-color-gray-3); }
+.lesson-title { font-weight: 650; font-size: var(--sl-text-lg); color: var(--sl-color-text-accent); }
+.lesson-ticket { color: var(--sl-color-gray-3); font-style: italic; }
+.lesson-status { display: flex; flex-direction: column; gap: 0.3rem; align-items: flex-end; flex-shrink: 0; }
+.progress-summary { font-weight: 600; color: var(--sl-color-green-high); }
+
+/* Reveal */
+.reveal { margin: 1.25rem 0; border: 1px dashed var(--sl-color-accent); border-radius: 0.5rem; background: var(--sl-color-accent-low); }
+.reveal summary { cursor: pointer; padding: 0.7rem 1rem; font-weight: 600; color: var(--sl-color-text-accent); }
+.reveal[open] summary { border-bottom: 1px dashed var(--sl-color-accent); }
+.reveal-body { padding: 0.25rem 1rem 0.75rem; }
+
+/* Quiz */
+.quiz { margin: 1.75rem 0; padding: 1rem; border: 1px solid var(--sl-color-hairline); border-radius: 0.6rem; background: var(--sl-color-bg-nav); }
+.quiz-question { margin-top: 0; }
+.quiz-options { display: grid; gap: 0.5rem; }
+.quiz-option {
+  text-align: left; font: inherit; padding: 0.6rem 0.8rem; border-radius: 0.5rem;
+  border: 1px solid var(--sl-color-hairline); background: var(--sl-color-bg); color: var(--sl-color-text); cursor: pointer;
+}
+.quiz-option:hover { border-color: var(--sl-color-accent); }
+.quiz.right .picked { border-color: var(--sl-color-green); background: var(--sl-color-green-low); }
+.quiz.wrong .picked { border-color: var(--sl-color-red); background: var(--sl-color-red-low); }
+.quiz-result { font-weight: 600; min-height: 1.5em; margin-bottom: 0; }
+.quiz.right .quiz-result { color: var(--sl-color-green-high); }
+.quiz.wrong .quiz-result { color: var(--sl-color-red-high); }
+.quiz-explain { color: var(--sl-color-gray-2); }
+
+/* Checklist */
+.checklist { list-style: none; padding: 0.75rem 1rem; border: 1px solid var(--sl-color-hairline); border-radius: 0.6rem; background: var(--sl-color-bg-nav); }
+.checklist li { margin: 0.3rem 0; }
+.checklist label { display: flex; gap: 0.6rem; align-items: baseline; cursor: pointer; }
+
+/* Lesson completion */
+.lesson-complete { margin: 3rem 0 0; padding-top: 1.5rem; border-top: 1px solid var(--sl-color-hairline); text-align: center; }
+.lesson-complete button, .sim button.primary {
+  font: inherit; font-weight: 600; padding: 0.6rem 1.1rem; border-radius: 0.5rem; cursor: pointer;
+  border: 1px solid var(--sl-color-accent); background: var(--sl-color-accent); color: var(--sl-color-black);
+}
+.lesson-complete.done button { background: var(--sl-color-green-low); color: var(--sl-color-green-high); border-color: var(--sl-color-green); }
+
+/* Ticket simulator */
+.sim { margin: 2rem 0; border: 1px solid var(--sl-color-hairline); border-radius: 0.75rem; background: var(--sl-color-bg-nav); overflow: hidden; }
+.sim-head { display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap; padding: 0.75rem 1rem; border-bottom: 1px solid var(--sl-color-hairline); }
+.sim-head strong { font-size: var(--sl-text-lg); }
+.sim-clock { font-variant-numeric: tabular-nums; color: var(--sl-color-orange-high); font-weight: 600; }
+.sim-body { padding: 1rem; }
+.sim-ticket { margin: 0 0 1rem; padding: 0.75rem 1rem; border-left: 3px solid var(--sl-color-orange); background: var(--sl-color-bg); border-radius: 0.25rem; white-space: pre-wrap; font-family: var(--sl-font-mono); font-size: var(--sl-text-sm); }
+.sim-label { font-weight: 600; margin: 1rem 0 0.5rem; }
+.sim-actions, .sim-causes { display: grid; gap: 0.5rem; }
+.sim-actions button, .sim-causes button {
+  text-align: left; font: inherit; padding: 0.55rem 0.8rem; border-radius: 0.5rem; cursor: pointer;
+  border: 1px solid var(--sl-color-hairline); background: var(--sl-color-bg); color: var(--sl-color-text);
+  display: flex; justify-content: space-between; gap: 1rem;
+}
+.sim-actions button:hover:not(:disabled), .sim-causes button:hover:not(:disabled) { border-color: var(--sl-color-accent); }
+.sim-actions button:disabled { opacity: 0.55; cursor: default; }
+.sim-cost { color: var(--sl-color-gray-3); font-size: var(--sl-text-sm); white-space: nowrap; }
+.sim-log { display: grid; gap: 0.75rem; margin: 1rem 0; }
+.sim-log:empty { display: none; }
+.sim-entry { border: 1px solid var(--sl-color-hairline); border-radius: 0.5rem; background: var(--sl-color-bg); padding: 0.6rem 0.8rem; }
+.sim-entry.bad { border-color: var(--sl-color-red); }
+.sim-entry.good { border-color: var(--sl-color-green); }
+.sim-entry p { margin: 0.25rem 0; }
+.sim-entry pre { margin: 0.5rem 0 0; padding: 0.6rem 0.75rem; border-radius: 0.4rem; background: var(--sl-color-gray-6); color: var(--sl-color-white); overflow-x: auto; font-size: var(--sl-text-xs); white-space: pre-wrap; word-break: break-word; }
+.sim-entry .sim-cmd { font-family: var(--sl-font-mono); font-size: var(--sl-text-sm); color: var(--sl-color-text-accent); }
+.sim-result { padding: 1rem; border-radius: 0.6rem; background: var(--sl-color-green-low); border: 1px solid var(--sl-color-green); }
+.sim-result h4 { margin-top: 0; }
+.sim-foot { display: flex; gap: 0.75rem; flex-wrap: wrap; margin-top: 1rem; }
+.sim button.secondary { font: inherit; padding: 0.5rem 1rem; border-radius: 0.5rem; cursor: pointer; border: 1px solid var(--sl-color-hairline); background: var(--sl-color-bg); color: var(--sl-color-text); }

@@ -6,12 +6,17 @@ lesson: 0
 phase: 0
 tags: [docker, docker-compose, health-checks, architecture, debugging]
 ticket: "The site is down."
+sidebar:
+  label: "0 · The site is down"
+  order: 0
 draft: true
 ---
 
 import Reveal from "../../site/src/components/Reveal.astro";
 import Quiz from "../../site/src/components/Quiz.astro";
 import Checklist from "../../site/src/components/Checklist.astro";
+import TicketSimulator from "../../site/src/components/TicketSimulator.astro";
+import siteDown from "../../site/src/scenarios/site-down";
 
 ## The ticket
 
@@ -195,8 +200,12 @@ for everything below.
 reports both data stores as fine, through both doors.
 
 ```bash
-docker compose ps
+docker compose ps --format "table {{.Service}}\t{{.Status}}\t{{.Ports}}"
 ```
+
+Plain `docker compose ps` works too, but prints seven wide columns. The
+`--format` part keeps only the three that matter here: the service, its status
+and its ports.
 
 ```
 SERVICE    STATUS                    PORTS
@@ -400,6 +409,14 @@ Nothing is listening on 8000, so the backend can't have sent anything. The only
 thing that answered was the go-between on 5173. A production proxy would say
 502 Bad Gateway, which is clearer.
 </Quiz>
+
+### Practise: handle the ticket
+
+Now try it under pressure. Each run hides a different broken part, picked at
+random. Every check costs time, and the customer is waiting. All the outputs
+are real ones from this lesson.
+
+<TicketSimulator scenario={siteDown} />
 
 ## Trade-offs & decisions
 
