@@ -41,3 +41,10 @@ class TenantIsolationTests(TestCase):
             organization=self.acme, ticket=globex_ticket, body="Who owns me?"
         )
         self.assertEqual(comment.organization, self.globex)            
+
+    def test_non_member_cannot_list_another_orgs_tickets(self):
+        gary = get_user_model().objects.create_user("gary", password="pw")
+        Membership.objects.create(organization=self.globex, user=gary)
+        self.client.force_login(gary)
+        response = self.client.get("/api/orgs/acme/tickets/")
+        self.assertEqual(response.status_code, 404)
