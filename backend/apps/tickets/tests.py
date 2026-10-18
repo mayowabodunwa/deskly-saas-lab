@@ -1,7 +1,6 @@
 from django.test import TestCase
-
-from apps.organizations.models import Organization
-
+from django.contrib.auth import get_user_model
+from apps.organizations.models import Membership, Organization
 from .models import Comment, Ticket
 
 
@@ -11,6 +10,9 @@ class TenantIsolationTests(TestCase):
         self.globex = Organization.objects.create(name="Globex", slug="globex")
         Ticket.objects.create(organization=self.acme, subject="Printer won't work")
         Ticket.objects.create(organization=self.globex, subject="Globex merger plans")
+        self.adam = get_user_model().objects.create_user("adam", password="pw")
+        Membership.objects.create(organization=self.acme, user=self.adam)
+        self.client.force_login(self.adam)
 
     def test_for_org_returns_only_that_orgs_tickets(self):
         subjects = [t.subject for t in Ticket.objects.for_org(self.acme)]
