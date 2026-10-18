@@ -158,7 +158,37 @@ convenience.)
 
 ---
 
-## 🔴 GAP-006 — Tenant resolution has no authorization behind it
+## ✅ GAP-006 (closed 2026-10-18) — Tenant resolution has no authorization behind it
+
+**Closed by:** Phase 2, Slice 2. `apps/organizations/access.py` adds
+`get_membership_or_404(request, slug)`, which looks up the caller's
+`Membership` in the org named by the URL, in one query. Both org-scoped views
+(`organization_detail`, `ticket_list`) use it, and both require
+`IsAuthenticated`. Commits `272d7c4` and `15946d0`.
+
+- Not logged in → `403` ("Authentication credentials were not provided.")
+- Logged in, not a member → `404`
+- Org doesn't exist → the same `404`, with the same body
+
+**Evidence:** checked by hand with curl as gary (Globex) against Acme: `404`
+on `/api/orgs/acme/tickets/`, and `403` with no login. Locked in by five
+tests: four in `organizations/tests.py::MembersOnlyTests` (member gets in,
+non-member gets 404, non-member and missing org give identical answers,
+anonymous refused) and
+`tickets/tests.py::test_non_member_cannot_list_another_orgs_tickets`. The
+last one was added because the first four only visit the company page:
+removing the check from `ticket_list` would have left every test green.
+
+**Note on 404 vs the Phase 1 plan:** Phase 1's notes said the closing test
+would assert `403`. It asserts `404`, following Phase 1's other rule: never
+confirm that a company exists to someone outside it.
+
+**Still true:** the check lives in each view. A new org-scoped view that
+forgets to call the helper reopens the hole for that view. Whatever Slice 3 does with roles, a test per
+endpoint is what actually holds the line.
+
+The original entry is kept below, unedited.
+
 
 **Where:** `backend/apps/organizations/views.py`, `backend/apps/organizations/urls.py`
 

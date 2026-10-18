@@ -27,6 +27,77 @@ character.
 
 ---
 
+## 2026-10-18 — `GOTCHA` — Auth / Testing — The members-only tests didn't cover the ticket list
+
+**Symptom**
+Deliberate break, reasoned rather than run. With the membership check removed
+from `ticket_list` (back to `Organization.objects.get(slug=slug)`), all eight
+tests would still pass, and gary could read Acme's tickets again.
+
+**What it means**
+The hole could reopen in one view with a green test suite.
+
+**Root cause**
+The ticket tests log in as adam, who **is** an Acme member, so they pass with
+or without the check. The four members-only tests in `organizations/tests.py`
+only visit `/api/orgs/<slug>/`, the company page. No test sent a non-member
+to `/api/orgs/acme/tickets/`.
+
+**Fix**
+
+```python
+def test_non_member_cannot_list_another_orgs_tickets(self):
+    gary = get_user_model().objects.create_user("gary", password="pw")
+    Membership.objects.create(organization=self.globex, user=gary)
+    self.client.force_login(gary)
+    response = self.client.get("/api/orgs/acme/tickets/")
+    self.assertEqual(response.status_code, 404)
+```
+
+Committed as `15946d0`. Nine tests.
+
+**Lesson**
+A test only protects the door it knocks on. Every org-scoped endpoint needs
+its own "non-member is refused" test. Same lesson as Phase 1 Slice 5, where the
+model test stayed green while the API leaked.
+
+---
+
+## 2026-10-18 — `ERROR` — Auth — One wrong capital letter crashed the whole server
+
+**Symptom**
+Every curl, to any page, got:
+
+```
+curl: (56) Recv failure: Connection reset by peer
+```
+
+**What it means**
+The server hung up without answering. An error page (404, 500) means the
+server is alive; a hang-up means it isn't running properly, usually because it
+crashed while loading.
+
+**Root cause**
+`docker compose logs --tail=30 backend`, read from the bottom:
+
+```
+  File "/app/apps/tickets/views.py", line 4, in <module>
+    from rest_framework.permissions import isAuthenticated
+ImportError: cannot import name 'isAuthenticated' from 'rest_framework.permissions' (/usr/local/lib/python3.12/site-packages/rest_framework/permissions.py). Did you mean: 'IsAuthenticated'?
+```
+
+Python names are case-sensitive. Django loads every view file at startup
+(through `urls.py`), so one bad import in one file stops every page.
+
+**Fix**
+`IsAuthenticated`, with a capital I. The dev server reloads on save.
+
+**Lesson**
+When the server hangs up, go to the logs, not to another curl. Same family as
+Phase 1's `Empty reply from server` from a missing `include` import.
+
+---
+
 ## 2026-10-11 — `GOTCHA` — Auth — Running `make seed` logged every demo user out
 
 **Symptom**

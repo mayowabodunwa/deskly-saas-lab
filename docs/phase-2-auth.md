@@ -108,12 +108,48 @@ Left as-is on purpose. In Slice 5, JWT login *does* send
 401 or 403. The choice belongs there.
 Docs: <https://www.django-rest-framework.org/api-guide/authentication/#unauthorized-and-forbidden-responses>
 
+### Slice 2 — members only: two questions, one lookup
+
+Before Slice 2, an org-scoped request asked one question: "does this company
+exist?" Slice 2 adds the second: "does this person belong to it?"
+
+```python
+# apps/organizations/access.py
+def get_membership_or_404(request, slug):
+    return get_object_or_404(
+        Membership.objects.select_related("organization"),
+        organization__slug=slug,
+        user=request.user,
+    )
+```
+
+- **One query does both.** It looks for a membership row matching this
+  company *and* this person. No row → 404.
+- **One helper, used by every org-scoped view.** One place to get right. The
+  risk is the opposite case: a new view that forgets to call it. Tests per
+  endpoint are what catch that (see the breaks below).
+- **It returns the membership, not just the company.** The membership carries
+  the role, which Slice 3 needs.
+- **`IsAuthenticated` runs first.** Strangers are refused (403) before any
+  lookup, and the helper never has to deal with an anonymous user.
+
+### Slice 2 — why 404, not 403
+
+403 would mean "this company exists, but you can't see it", which tells a
+stranger that the company is a Deskly customer. With 404, a company you don't
+belong to and a company that doesn't exist get **the same status and the same
+body**. A test compares the two whole responses to keep it that way.
+
+Trade-off: support can't tell from the status alone whether a user typed the
+wrong company or lacks a membership. The answer is in the database
+(`organizations_membership`), not in the response, which is where it belongs.
+
 ## Build slices
 
 - [x] Slice 1 — **Log in with a session.** Demo users with memberships; a
       login endpoint; `/api/me/` answers "who am I?". Done 2026-10-11.
-- [ ] Slice 2 — **Members only.** The company in the URL must be one the user
-      belongs to. Closes GAP-006.
+- [x] Slice 2 — **Members only.** The company in the URL must be one the user
+      belongs to. Closed GAP-006. Done 2026-10-18.
 - [ ] Slice 3 — **Roles.** Viewers can read but not write; agents and owners
       can write. Permission tests.
 - [ ] Slice 4 — **CSRF for the web app.** The browser proves a write came from
@@ -139,6 +175,21 @@ Each slice: build it → break it on purpose → diagnose from symptoms → fix.
 4. **Reseeding.** `make seed` logged out every demo user, though no password
    changed. Fixed with `check_password()` (see above).
 
+### Slice 2 — the breaks
+
+1. **The hole, seen first.** Before the fix, gary (Globex) got Acme's tickets,
+   and so did a stranger with no login: `200 OK` and the full list.
+2. **Locking the door broke the old tests.** The two Phase 1 ticket tests
+   visited the ticket list without logging in, and now got `403 != 200` and
+   `403 != 201`. The tests still checked the right things; they gained
+   `force_login(adam)` in `setUp` and passed again.
+3. **Removing the check from one view (reasoned, not run).** With
+   `ticket_list` back on `Organization.objects.get(slug=slug)`, all eight tests
+   would still pass: the ticket tests log in as a member, and the members-only
+   tests only visit the company page. The learner chose to skip running it.
+   The missing test was added
+   (`test_non_member_cannot_list_another_orgs_tickets`), making nine.
+
 ## How to verify
 
 Slice 1:
@@ -162,6 +213,19 @@ curl -s -b /tmp/deskly-cookies.txt http://localhost:8000/api/me/
 ```
 
 Every healthy row in `auth_user.password` starts with `pbkdf2_sha256$`.
+
+Slice 2:
+
+```bash
+curl -s -c /tmp/gary-cookies.txt -H "Content-Type: application/json" \
+  -d '{"username": "gary", "password": "deskly-demo"}' \
+  http://localhost:8000/api/auth/login/
+
+curl -i -b /tmp/gary-cookies.txt http://localhost:8000/api/orgs/acme/tickets/    # 404
+curl -i http://localhost:8000/api/orgs/acme/tickets/                             # 403
+curl -i -b /tmp/gary-cookies.txt http://localhost:8000/api/orgs/globex/tickets/  # 200
+make test                                                                        # 9 tests, OK
+```
 
 ## Commands used
 
@@ -217,3 +281,16 @@ authenticate(username="vera", password="deskly-demo")   # <User: vera> or None
 - **Pasting into the Python shell:** a line that starts with spaces gives
   `IndentationError: unexpected indent`, and a new shell gives
   `NameError: name 'User' is not defined` until you import again.
+- **`curl: (56) Recv failure: Connection reset by peer`** → the server hung
+  up without answering, which usually means it crashed while loading. Read
+  `docker compose logs --tail=30 backend` from the bottom. Real case:
+  `isAuthenticated` instead of `IsAuthenticated` in one view file took the
+  whole server down.
+- **The cookie file vanished.** `/tmp` is emptied when the Mac restarts, so
+  `/tmp/deskly-cookies.txt` from an earlier session is gone, and `/api/me/`
+  says "credentials were not provided". Log in again.
+- **An edit that didn't take effect** → check the editor tab for the white
+  "unsaved" dot before debugging anything else.
+- **A test only protects the door it knocks on.** A members-only test on the
+  company page says nothing about the ticket list. Each org-scoped endpoint
+  needs its own non-member test.
