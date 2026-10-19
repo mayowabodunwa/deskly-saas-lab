@@ -144,14 +144,55 @@ Trade-off: support can't tell from the status alone whether a user typed the
 wrong company or lacks a membership. The answer is in the database
 (`organizations_membership`), not in the response, which is where it belongs.
 
+### Slice 3 — roles: a plain function, not a DRF permission class
+
+```python
+# apps/organizations/access.py
+WRITE_ROLES = {Membership.Role.OWNER, Membership.Role.AGENT}
+
+def require_write_role(membership):
+    if membership.role not in WRITE_ROLES:
+        raise PermissionDenied("Viewers can read tickets but not change them.")
+```
+
+`ticket_list` calls it inside `if request.method == "POST":`, **before** the
+serializer saves anything.
+
+- **Why not a DRF permission class?** Permission classes run before the view
+  body, before the membership has been looked up, so the class would have to
+  look it up a second time. A function called inside the view reuses the
+  membership Slice 2's helper already returned: one query. Revisit when there
+  are many views (Phase 6).
+- **`WRITE_ROLES` is written once.** A new role means one line to change.
+- **The 403 body says why.** "Viewers can read tickets but not change them"
+  turns the support ticket "it just says forbidden" into a one-line answer.
+- **The order of the checks:** logged in? (403) → member? (404) → role
+  allowed? (403). A stranger never reaches the role check, so learns nothing
+  about who has which job inside a company.
+
+### Slice 3 — why Membership decides access, not the ticket's foreign key
+
+Two links, two questions. `Ticket.organization` says which company a ticket
+belongs to; it knows nothing about people. `Membership` says which company a
+person belongs to and with which role; it's the only link between a user and a
+company. Access means connecting a person to data, so it needs both:
+
+```
+person ──Membership (role)──► Organization ◄──foreign key── Ticket
+```
+
+The role lives on the membership, not on the user, because one person can
+belong to several companies with a different job at each (the Phase 1 user
+`mayowa` is an owner at Acme and a viewer at Globex).
+
 ## Build slices
 
 - [x] Slice 1 — **Log in with a session.** Demo users with memberships; a
       login endpoint; `/api/me/` answers "who am I?". Done 2026-10-11.
 - [x] Slice 2 — **Members only.** The company in the URL must be one the user
       belongs to. Closed GAP-006. Done 2026-10-18.
-- [ ] Slice 3 — **Roles.** Viewers can read but not write; agents and owners
-      can write. Permission tests.
+- [x] Slice 3 — **Roles.** Viewers can read but not write; agents and owners
+      can write. Permission tests. Done 2026-10-19.
 - [ ] Slice 4 — **CSRF for the web app.** The browser proves a write came from
       Deskly's own pages.
 - [ ] Slice 5 — **Tokens for scripts (JWT).** Short-lived access tokens plus
@@ -190,6 +231,15 @@ Each slice: build it → break it on purpose → diagnose from symptoms → fix.
    The missing test was added
    (`test_non_member_cannot_list_another_orgs_tickets`), making nine.
 
+### Slice 3 — the breaks
+
+1. **The problem, seen first.** vera (viewer) created a ticket with `201`.
+2. **The check after the save.** With `require_write_role(membership)` moved
+   below `serializer.save(...)`, vera got `403`, and the ticket was saved
+   anyway. Seen by hand. A response that says "no" proves nothing about what
+   already happened. `test_viewer_cannot_create_a_ticket` checks both the
+   `403` and that no ticket exists, so it guards this.
+
 ## How to verify
 
 Slice 1:
@@ -225,6 +275,22 @@ curl -i -b /tmp/gary-cookies.txt http://localhost:8000/api/orgs/acme/tickets/   
 curl -i http://localhost:8000/api/orgs/acme/tickets/                             # 403
 curl -i -b /tmp/gary-cookies.txt http://localhost:8000/api/orgs/globex/tickets/  # 200
 make test                                                                        # 9 tests, OK
+```
+
+Slice 3 (a logged-in write needs the CSRF token as well as the cookie; Slice 4
+explains why):
+
+```bash
+curl -s -c /tmp/vera-cookies.txt -H "Content-Type: application/json" \
+  -d '{"username": "vera", "password": "deskly-demo"}' \
+  http://localhost:8000/api/auth/login/
+CSRF=$(grep csrftoken /tmp/vera-cookies.txt | awk '{print $7}')
+curl -i -b /tmp/vera-cookies.txt \
+  -H "Content-Type: application/json" -H "X-CSRFToken: $CSRF" \
+  -d '{"subject": "Vera was here"}' \
+  http://localhost:8000/api/orgs/acme/tickets/
+# 403 {"detail":"Viewers can read tickets but not change them."}
+# The same as adam: 201. make test: 11 tests, OK.
 ```
 
 ## Commands used
@@ -294,3 +360,9 @@ authenticate(username="vera", password="deskly-demo")   # <User: vera> or None
 - **A test only protects the door it knocks on.** A members-only test on the
   company page says nothing about the ticket list. Each org-scoped endpoint
   needs its own non-member test.
+- **`{"detail":"CSRF Failed: CSRF token missing."}` on a curl write** while
+  logged in → session writes need the `X-CSRFToken` header as well as the
+  cookie. Reads don't. Django's test client skips this check by default, which
+  is why the tests don't need it. Slice 4.
+- **A 403 that still changed data.** Put permission checks before anything is
+  saved, and make tests check the database, not just the status code.
