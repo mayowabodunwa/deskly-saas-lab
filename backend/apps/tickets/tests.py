@@ -48,3 +48,26 @@ class TenantIsolationTests(TestCase):
         self.client.force_login(gary)
         response = self.client.get("/api/orgs/acme/tickets/")
         self.assertEqual(response.status_code, 404)
+
+    def test_viewer_cannot_create_a_ticket(self):
+        vera = get_user_model().objects.create_user("vera", password="pw")
+        Membership.objects.create(
+            organization=self.acme, user=vera, role=Membership.Role.VIEWER
+        )
+        self.client.force_login(vera)
+        response = self.client.post(
+            "/api/orgs/acme/tickets/",
+            {"subject": "Vera was here"},
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(Ticket.objects.filter(subject="Vera was here").exists())
+
+    def test_viewer_can_still_read_tickets(self):
+        vera = get_user_model().objects.create_user("vera", password="pw")
+        Membership.objects.create(
+            organization=self.acme, user=vera, role=Membership.Role.VIEWER
+        )
+        self.client.force_login(vera)
+        response = self.client.get("/api/orgs/acme/tickets/")
+        self.assertEqual(response.status_code, 200)       

@@ -1,4 +1,4 @@
-from apps.organizations.access import get_membership_or_404
+from apps.organizations.access import get_membership_or_404, require_write_role
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
@@ -11,9 +11,11 @@ from .serializers import TicketSerializer
 @permission_classes([IsAuthenticated])
 def ticket_list(request, slug):
     """Read or create tickets, but only in an org you belong to."""
-    organization = get_membership_or_404(request, slug).organization
+    membership = get_membership_or_404(request, slug)
+    organization = membership.organization
 
     if request.method == "POST":
+        require_write_role(membership)
         serializer = TicketSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         serializer.save(organization=organization)
