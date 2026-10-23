@@ -1,4 +1,5 @@
-from django.contrib.auth import authenticate, login
+from django.contrib.auth import authenticate, login, logout
+from django.middleware.csrf import get_token
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -33,3 +34,19 @@ def me(request):
             for m in memberships
         ],
     })
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def csrf(request):
+    """Give the browser a CSRF token cookie before its first write."""
+    get_token(request)
+    return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def logout_view(request):
+    """End the session: Deskly throws away its note."""
+    logout(request)
+    return Response(status=status.HTTP_204_NO_CONTENT)
