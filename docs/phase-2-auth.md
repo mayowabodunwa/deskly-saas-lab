@@ -185,6 +185,66 @@ The role lives on the membership, not on the user, because one person can
 belong to several companies with a different job at each (the Phase 1 user
 `mayowa` is an owner at Acme and a viewer at Globex).
 
+### Slice 4 — CSRF: what the attack is and what stops it
+
+**The attack.** adam is logged into Deskly. He visits `evil.com`, which has
+hidden code that sends a write to Deskly. The browser attaches adam's
+`sessionid` cookie automatically, and Deskly sees a valid login. The cookie
+proves which **browser** sent the request, not which **website** told it to.
+
+**Two checks, both made by Django on every logged-in write:**
+
+| Check | Question | Why `evil.com` fails it |
+|---|---|---|
+| Token | Did the request carry the `csrftoken` value in the `X-CSRFToken` header? | One site can't read another site's cookies, so `evil.com` can't copy the token |
+| Origin | Does the browser's `Origin` header match Django's own address (or `CSRF_TRUSTED_ORIGINS`)? | The browser labels the request `Origin: https://evil.com` |
+
+Reads (GET) need neither: they must never change anything, and the browser
+won't let `evil.com` see the answer.
+
+**Defence in depth:** the session cookie is also `SameSite=Lax` (Slice 1), so
+modern browsers mostly don't send it on requests started by other sites. The
+token is the layer that still holds if that one doesn't.
+
+**When DRF enforces it:** session auth checks CSRF only for a **logged-in**
+user. Anonymous requests, including the login itself, skip it. See GAP-014.
+
+### Slice 4 — the endpoints
+
+- **`GET /api/auth/csrf/`** calls `get_token(request)`, which makes Django set
+  the `csrftoken` cookie on the reply. Before this, the cookie only arrived at
+  login, and a page needs it before its first write.
+- **`POST /api/auth/logout/`** calls `logout(request)`, which deletes the
+  `django_session` row. It's a POST because logging out changes something: as
+  a GET, any site could log you out with an image tag pointing at the URL.
+  Both live in `accounts`, next to login.
+
+### Slice 4 — the browser side
+
+`frontend/src/api.ts` has two functions, and the app talks to the API only
+through them: `getJson` (no token) and `postJson` (always copies the
+`csrftoken` cookie into `X-CSRFToken`). One place to send the token means no
+button can forget it. The page can read `csrftoken` but not `sessionid`,
+which is `HttpOnly`: it can prove where it is without being able to steal the
+login. `Auth.tsx` fetches `/api/auth/csrf/` when it opens, then `/api/me/`.
+
+The frontend files were written by me at the learner's request, then rewritten
+for readability (plain loops, `if/else`, full names) after the first version
+read as too dense.
+
+### Slice 4 — the dev proxy keeps the Host header
+
+`frontend/vite.config.ts` now has `changeOrigin: false`. With `true`, Vite
+rewrote the Host to `backend:8000`, so Django saw `Origin: localhost:5173` on a
+request addressed to `backend:8000` and refused every logged-in write from the
+browser. Keeping the Host is what a production reverse proxy does (Nginx's
+`proxy_set_header Host $host`), so local behaves like production.
+
+The alternative was `CSRF_TRUSTED_ORIGINS = ["http://localhost:5173"]`. It
+works, but it papers over the mismatch rather than removing it, and adds a
+setting to keep in step. Production will still need the setting if the SPA
+and the API ever live on different domains.
+
 ## Build slices
 
 - [x] Slice 1 — **Log in with a session.** Demo users with memberships; a
@@ -193,8 +253,9 @@ belong to several companies with a different job at each (the Phase 1 user
       belongs to. Closed GAP-006. Done 2026-10-18.
 - [x] Slice 3 — **Roles.** Viewers can read but not write; agents and owners
       can write. Permission tests. Done 2026-10-19.
-- [ ] Slice 4 — **CSRF for the web app.** The browser proves a write came from
-      Deskly's own pages.
+- [x] Slice 4 — **CSRF for the web app.** The browser proves a write came from
+      Deskly's own pages. Plus logout and a login box in the React app.
+      Done 2026-10-23.
 - [ ] Slice 5 — **Tokens for scripts (JWT).** Short-lived access tokens plus
       refresh, and login throttling.
 - [ ] Slice 6 — **Sign in with Google (OAuth).** Optional; needs a Google Cloud
@@ -239,6 +300,21 @@ Each slice: build it → break it on purpose → diagnose from symptoms → fix.
    anyway. Seen by hand. A response that says "no" proves nothing about what
    already happened. `test_viewer_cannot_create_a_ticket` checks both the
    `403` and that no ticket exists, so it guards this.
+
+### Slice 4 — the breaks
+
+1. **Logout without the token** (curl, playing `evil.com`): `403`,
+   `"CSRF Failed: CSRF token missing."`; with the token, `204`, and `/api/me/`
+   then says "credentials were not provided".
+2. **Code in the wrong app.** The new views and URLs went into
+   `organizations`, giving `404` on `/api/auth/csrf/`. Under `organizations`
+   the address would be `/api/orgs/auth/csrf/`, and even that is caught first by
+   `"<slug:slug>/"`, which treats `auth` as a company name. Moved to
+   `accounts`.
+3. **The Origin check in the browser.** Login worked in the React app; logout
+   showed `CSRF Failed: Origin checking failed - http://localhost:5173 does not
+   match any trusted origins.` The token was fine; the dev proxy was rewriting
+   the Host. Fixed with `changeOrigin: false`.
 
 ## How to verify
 
@@ -292,6 +368,22 @@ curl -i -b /tmp/vera-cookies.txt \
 # 403 {"detail":"Viewers can read tickets but not change them."}
 # The same as adam: 201. make test: 11 tests, OK.
 ```
+
+Slice 4:
+
+```bash
+curl -i -c /tmp/fresh-cookies.txt http://localhost:8000/api/auth/csrf/   # 204 + csrftoken cookie
+curl -s -c /tmp/adam-cookies.txt -H "Content-Type: application/json" \
+  -d '{"username": "adam", "password": "deskly-demo"}' \
+  http://localhost:8000/api/auth/login/
+curl -i -b /tmp/adam-cookies.txt -X POST http://localhost:8000/api/auth/logout/  # 403 CSRF
+CSRF=$(grep csrftoken /tmp/adam-cookies.txt | awk '{print $7}')
+curl -i -b /tmp/adam-cookies.txt -H "X-CSRFToken: $CSRF" -X POST \
+  http://localhost:8000/api/auth/logout/                                       # 204
+```
+
+In the browser: http://localhost:5173 → log in as adam → Log out → back to the
+form, no red message. `make test`: 13 tests, OK.
 
 ## Commands used
 
@@ -366,3 +458,15 @@ authenticate(username="vera", password="deskly-demo")   # <User: vera> or None
   is why the tests don't need it. Slice 4.
 - **A 403 that still changed data.** Put permission checks before anything is
   saved, and make tests check the database, not just the status code.
+- **Works with curl, fails in the browser** → the browser adds things curl
+  doesn't. Here, the `Origin` header, which Django's CSRF check compares with
+  the request's Host.
+- **`CSRF Failed: Origin checking failed - … does not match any trusted
+  origins.`** → the token is fine; the Origin and Host disagree. Look for a
+  proxy rewriting the Host before reaching for `CSRF_TRUSTED_ORIGINS`.
+- **A 404 on a brand-new URL** → check which app's `urls.py` it went into. Each
+  app's URLs sit under its own prefix, and a catch-all like `"<slug:slug>/"`
+  swallows anything listed after it.
+- **Testing CSRF:** Django's test client skips it unless built with
+  `Client(enforce_csrf_checks=True)`. Headers are passed as
+  `HTTP_X_CSRFTOKEN=...`.

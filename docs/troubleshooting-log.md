@@ -27,6 +27,67 @@ character.
 
 ---
 
+## 2026-10-23 — `GOTCHA` — Auth / Frontend — Logout worked with curl and failed in the browser
+
+**Symptom**
+In the React app at `http://localhost:5173`, login worked. Log out showed, in
+red:
+
+```
+CSRF Failed: Origin checking failed - http://localhost:5173 does not match any trusted origins.
+```
+
+The same logout with curl, sending the same token, returned `204`.
+
+**What it means**
+The token check passed. A second CSRF check, on the `Origin` header, failed.
+
+**Root cause**
+Browsers label every write with `Origin: http://localhost:5173`. Django
+compares that with the request's Host. The Vite dev proxy had
+`changeOrigin: true`, which rewrote the Host to `backend:8000` on the way
+through, so the two disagreed and Django treated it as a cross-site request.
+curl sends no `Origin` header, so the check never ran there.
+
+**Fix**
+`changeOrigin: false` in `frontend/vite.config.ts`, so the proxy keeps the
+browser's Host, as a production reverse proxy does. (The other fix,
+`CSRF_TRUSTED_ORIGINS`, was considered and not chosen; see the phase notes.)
+
+**Lesson**
+"Works with curl, fails in the browser" means the browser is adding something
+curl isn't. Find what, before changing settings.
+
+---
+
+## 2026-10-23 — `GOTCHA` — Auth — New login URLs gave 404: the code was in the wrong app
+
+**Symptom**
+`curl -i -c /tmp/fresh-cookies.txt http://localhost:8000/api/auth/csrf/` →
+Django's "Page not found (404)" page.
+
+**What it means**
+No URL pattern matched `/api/auth/csrf/`.
+
+**Root cause**
+The new `csrf` and `logout_view` views and their `path(...)` lines went into
+`organizations/views.py` and `organizations/urls.py` instead of `accounts`.
+Every `organizations` URL sits under `/api/orgs/`, so the address would have
+been `/api/orgs/auth/csrf/`, and even that is caught first by the
+`"<slug:slug>/"` pattern above it, which treats `auth` as a company slug. The
+views would also have crashed: `status` wasn't imported in that file.
+
+**Fix**
+`git restore` on the two `organizations` files, then the same code added to
+`accounts/views.py` and `accounts/urls.py`.
+
+**Lesson**
+A 404 on a URL you just added: check which `urls.py` it's in and what prefix
+that file is included under. See `docs/django-apps-map.md` for which app owns
+what.
+
+---
+
 ## 2026-10-18 — `GOTCHA` — Auth / Testing — The members-only tests didn't cover the ticket list
 
 **Symptom**

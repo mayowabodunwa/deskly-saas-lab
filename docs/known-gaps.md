@@ -473,5 +473,30 @@ Found in Phase 2, Slice 1 (2026-10-11).
 
 ---
 
+## 🟡 GAP-014 — The login endpoint isn't CSRF-protected
+
+**Where:** `backend/apps/accounts/views.py` — `login_view`
+
+DRF's session auth checks CSRF only for requests from a user who is already
+logged in. A login request is anonymous by definition, so it skips the check.
+
+**The attack it allows ("login CSRF"):** `evil.com` silently logs the victim's
+browser into the **attacker's** Deskly account. Anything the victim then
+types, such as a ticket containing private details, lands in an account the
+attacker can read.
+
+**What production does:** enforces CSRF on the login view too, for example by
+calling `SessionAuthentication().enforce_csrf(request)` at the top of it, and
+the SPA fetches `/api/auth/csrf/` before showing the form (`Auth.tsx` already
+does). `SameSite=Lax` already blunts most of this in modern browsers, which is
+why it's 🟡 and not higher.
+
+**Trigger to close:** before any real user, alongside GAP-013. Cheap to do;
+remember a test with `Client(enforce_csrf_checks=True)`.
+
+Found in Phase 2, Slice 4 (2026-10-23).
+
+---
+
 <!-- New gaps: assign the next GAP-NNN, pick a severity, and always fill in the
      trigger. A gap with no trigger becomes permanent by accident. -->
