@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import Auth from "./Auth";
 
 type Health = { status: string; db: boolean; redis: boolean };
 
@@ -17,6 +18,7 @@ export default function App() {
     <main style={{ fontFamily: "system-ui", padding: "3rem", maxWidth: 640, margin: "0 auto" }}>
       <h1>Deskly</h1>
       <p style={{ color: "#666" }}>SaaS lab — Phase 0 foundation. This page fetches the backend health check.</p>
+      <Auth />
       {error && <pre style={{ color: "crimson" }}>Error: {error}</pre>}
       {health ? (
         <div style={{ padding: "1rem 1.25rem", border: "1px solid #ddd", borderRadius: 12 }}>
