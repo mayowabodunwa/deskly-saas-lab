@@ -552,5 +552,33 @@ Found in Phase 2, Slice 5 (2026-10-24).
 
 ---
 
+## 🟡 GAP-017 — allauth adds a second password login page with different rules
+
+**Where:** `backend/config/urls.py` — `path("accounts/", include("allauth.urls"))`
+
+Including all of allauth's URLs for Google sign-in also switched on its own
+pages. Sign-up is closed (`NoSignupAdapter`), but these still work:
+
+- **`/accounts/login/`**: a second username + password login (returns 200).
+  It isn't covered by our `LoginRateThrottle` (5/minute). allauth limits it
+  itself, to 10 failed tries a minute per IP and 5 per 5 minutes per
+  username, so it isn't unprotected. But there are now two front doors with
+  two different rules.
+- **`/accounts/password/reset/`** and friends: password reset by email.
+  Django has no email server set up, so this would fail or go nowhere.
+
+**What production does:** decides on **one** password login. Either use
+allauth's pages for everything, or expose only the Google URLs and block the
+rest. Either way, one throttle rule applies to all password logins, and a
+test asserts the unused pages return 404.
+
+**Trigger to close:** before any real user, or when email sending is set up
+(Phase 4 sends email), whichever comes first. Whoever sets up email decides
+whether allauth's reset flow stays.
+
+Found in Phase 2, Slice 6 (2026-10-24).
+
+---
+
 <!-- New gaps: assign the next GAP-NNN, pick a severity, and always fill in the
      trigger. A gap with no trigger becomes permanent by accident. -->

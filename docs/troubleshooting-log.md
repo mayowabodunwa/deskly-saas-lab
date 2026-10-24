@@ -27,6 +27,122 @@ character.
 
 ---
 
+## 2026-10-24 — `GOTCHA` — Auth / OAuth — Google sign-in worked, then the password stopped working
+
+**Symptom**
+olivia's email was set to a Gmail address in the shell (`olivia.email = …`),
+and "Sign in with Google" logged in as olivia. Afterwards, olivia's normal
+login with `deskly-demo` failed, and:
+
+```
+>>> olivia.has_usable_password()
+False
+```
+
+Her password hash now started with `!`.
+
+**What it means**
+Something replaced the password with one that can never match. Nobody had
+changed it by hand.
+
+**Root cause**
+allauth did it, on purpose. When a Google email matches a user whose email
+isn't recorded as **verified** in allauth's own `EmailAddress` table, allauth
+calls `set_unusable_password()`. Setting `User.email` doesn't count as
+verified. The attack it prevents: someone signs up with your email address
+before you do and keeps the password; when you later sign in with Google, you
+both have the account. Wiping the password locks that person out. (Code:
+`allauth/socialaccount/internal/flows/email_authentication.py`,
+`wipe_password`.)
+
+**Fix**
+`make seed` restored the password (the seed resets any demo password that
+doesn't match). Then, in the shell, the email was recorded as verified:
+
+```python
+EmailAddress.objects.update_or_create(
+    user=olivia, email=olivia.email,
+    defaults={"verified": True, "primary": True},
+)
+```
+
+The `SocialAccount` link from the first login was deleted, so the next Google
+login went through the email check again. The password survived it.
+
+**Lesson**
+"Google login worked, and now my password doesn't" isn't a bug report about
+passwords. It means the email on that account was never verified. Check
+allauth's email table before resetting anything.
+
+---
+
+## 2026-10-24 — `ERROR` — Auth / OAuth — After Google sign-in, a 404 for `accounts/profile/`
+
+**Symptom**
+After choosing a Google account, the browser landed on a Django 404:
+
+```
+The current path, accounts/profile/, didn’t match any of these.
+```
+
+**What it means**
+Something sent the browser to `/accounts/profile/`, an address Deskly
+doesn't have.
+
+**Root cause**
+After any successful login, Django redirects to `LOGIN_REDIRECT_URL`, and the
+built-in default is `/accounts/profile/`. The line
+`LOGIN_REDIRECT_URL = "/"` had been left out of `settings.py`. The login itself
+had worked: opening `http://localhost:5173` showed olivia logged in.
+
+**Fix**
+`LOGIN_REDIRECT_URL = "/"` in `settings.py`.
+
+**Lesson**
+"I logged in and got a 404" usually means the login worked and the "where
+next" address is wrong. Check whether the person is logged in before debugging
+the login.
+
+---
+
+## 2026-10-24 — `ERROR` — Auth / OAuth — Google said `redirect_uri_mismatch`
+
+**Symptom**
+Opening `http://localhost:8000/accounts/google/login/` and clicking Continue
+showed, on Google's page:
+
+```
+You can't sign in because this app sent an invalid request. You can try again later, or contact the developer about this issue.
+Error 400: redirect_uri_mismatch
+```
+
+**What it means**
+Google refused the request. It's not a crash in Deskly: Deskly built the
+request and the browser delivered it.
+
+**Root cause**
+allauth builds the return address from the address you visited, so it asked
+Google to send the browser back to
+`http://localhost:8000/accounts/google/login/callback/`. The only address on
+the console list was `http://localhost:5173/accounts/google/login/callback/`.
+Same path, different port. My first guess was that the backend didn't know how
+to log in with Google, but reaching Google's page proves it did.
+
+**Fix**
+Start the login from the React app on 5173, not by adding 8000 to the list.
+The Vite proxy forwards `/accounts` with `changeOrigin: false`, so allauth
+builds the 5173 address, and the session cookie lands where the app runs.
+
+**Lesson**
+Google is strict here on purpose. The return address receives a one-time
+login code, so an unchecked address could hand that code to an attacker.
+
+*Support angle:* compare the `redirect_uri` under "see error details" with
+the console list. The usual culprits are a port, `http` vs `https`, `www.`
+vs none, or a trailing slash.
+
+---
+
 ## 2026-10-24 — `GOTCHA` — Auth — A logged-in user could guess passwords with no limit
 
 **Symptom**

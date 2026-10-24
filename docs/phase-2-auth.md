@@ -47,6 +47,13 @@ between `401` ("who are you?") and `403` ("I know who you are, and no").
 - **Throttling (rate limiting)**: a limit on how often someone can call an
   endpoint. Over the limit, the answer is `429 Too Many Requests` with a
   `Retry-After` header. On login it stops password guessing at scale.
+- **OAuth**: one site trusting another to say who someone is. Deskly sends the
+  browser to Google, the person logs in *at Google*, and Google sends them back
+  with a one-time code. Deskly's server swaps the code for their name and
+  email. Deskly never sees the Google password.
+- **Redirect URI**: the exact address Google may send people back to. Google
+  refuses any address not on the list in its console, so a one-time code can't
+  be delivered to an attacker's site.
 
 ## Architecture decisions & trade-offs
 
@@ -353,6 +360,65 @@ caller is anonymous and counted by IP. SimpleJWT's token view already works
 this way. Refusing logins from logged-in callers was the other option; it
 would break switching accounts on a shared computer.
 
+### Slice 6 — Google sign-in with django-allauth
+
+```
+browser ── POST /accounts/google/login/ (+ CSRF token) ──▶ Deskly
+browser ◀── 302 to accounts.google.com?client_id=…&redirect_uri=…5173/…/callback/
+browser ── logs in at Google, clicks Allow
+browser ◀── 302 to localhost:5173/accounts/google/login/callback/?code=…
+Deskly  ── swaps the code for name + email (server to server, uses the secret)
+Deskly  ── finds the user with that verified email, logs them in (session cookie)
+browser ◀── 302 to LOGIN_REDIRECT_URL = "/"
+```
+
+**A library, not our own code.** OAuth is where home-made code gets subtle
+security bugs (state checks, code swaps, token checks). `django-allauth` 65.20
+does the whole round trip; we wrote only settings, an adapter, a form and
+tests. The client ID and secret are read from `GOOGLE_OAUTH_CLIENT_ID` and
+`GOOGLE_OAUTH_CLIENT_SECRET` in `.env`, never committed.
+
+**Pages, not JSON.** allauth lives under `/accounts/`, not `/api/`: the
+browser visits these addresses and follows redirects. The Vite proxy forwards
+`/accounts` with `changeOrigin: false`, so allauth builds the callback address
+from `localhost:5173`, which is the one registered with Google, and the session
+cookie lands where the React app runs.
+
+**Only POST starts a login.** A GET shows a "Continue" page
+(`SOCIALACCOUNT_LOGIN_ON_GET` is left `False`). Otherwise any site could start a
+Google login in your browser with a plain link. The React button is a real
+`<form method="post">` with a hidden `csrfmiddlewaretoken`, because the whole
+page has to go to Google and back, which `fetch` can't do. `Auth.tsx` stores the
+token in state once `/api/auth/csrf/` has set it: on a first visit the form is
+drawn before the cookie exists.
+
+### Slice 6 — only existing users, matched by verified email
+
+```python
+# apps/accounts/adapters.py
+class NoSignupAdapter(DefaultAccountAdapter):
+    def is_open_for_signup(self, request):
+        return False
+```
+
+A Google stranger would have no membership and see nothing, so sign-up is
+closed: unknown emails get allauth's "Sign Up Closed" page. The same adapter
+closes allauth's own `/accounts/signup/` form. New people will join by invite,
+later.
+
+`SOCIALACCOUNT_EMAIL_AUTHENTICATION = True` lets a Google email log into the
+Deskly user with that email. That's safe only because Google verifies emails
+before vouching for them. `..._AUTO_CONNECT = True` then links the Google
+account to the user, so later logins follow the link.
+
+**allauth trusts its own email table, not `User.email`.** If the match is on
+an email allauth hasn't recorded as **verified**, it wipes the user's
+password on the first Google login. That's on purpose. Otherwise someone who
+signed up with your email before you, and knows its password, would share the
+account with you. Lab users are linked in the shell with a verified
+`EmailAddress` row; real users will get one by clicking an emailed link or
+accepting an invite.
+
 ## Build slices
 
 - [x] Slice 1 — **Log in with a session.** Demo users with memberships; a
@@ -367,8 +433,8 @@ would break switching accounts on a shared computer.
 - [x] Slice 5 — **Tokens for scripts (JWT).** Short-lived access tokens plus
       refresh, and login throttling. Anonymous requests now get 401.
       Done 2026-10-24.
-- [ ] Slice 6 — **Sign in with Google (OAuth).** Optional; needs a Google Cloud
-      project.
+- [x] Slice 6 — **Sign in with Google (OAuth).** django-allauth; existing
+      users only, matched by verified email. Done 2026-10-24.
 
 Each slice: build it → break it on purpose → diagnose from symptoms → fix.
 
@@ -440,6 +506,29 @@ Each slice: build it → break it on purpose → diagnose from symptoms → fix.
    the Django shell: logged in as adam, 8 wrong logins for olivia gave `400`
    eight times, never `429`. The second test was written first and failed
    (`400 != 429`), then `@authentication_classes([])` made it pass.
+
+### Slice 6 — the breaks
+
+1. **Starting from port 8000.** `localhost:8000/accounts/google/login/` →
+   Continue → Google: `Error 400: redirect_uri_mismatch`. The request asked
+   for `…8000…/callback/`; only `…5173…/callback/` is registered. The
+   learner's first guess was "the backend doesn't know how to log in with
+   Google". It did: the browser reached Google, and Google refused the address.
+   Fixed by going through 5173, not by adding 8000 to Google's list.
+2. **A Gmail no user has.** Google login → "Sign Up Closed". Correct: the
+   adapter refused a stranger.
+3. **Missing `LOGIN_REDIRECT_URL`.** After Google, a Django 404 for
+   `accounts/profile/`, Django's default "after login" address. The login had
+   worked: opening `localhost:5173` showed olivia logged in.
+4. **Email set on the user only.** `olivia.email = <gmail>`, then Google
+   login: it worked, and afterwards olivia's password login failed,
+   `has_usable_password()` → `False`, and the hash started with `!`. allauth
+   wiped it because the email wasn't verified in its table. Fixed: `make seed`
+   (restores the password), a verified `EmailAddress` row, and the
+   `SocialAccount` link deleted so the email check ran again. Password then
+   survived the Google login.
+5. **Sign-ups opened.** `return True` in the adapter, and
+   `test_nobody_can_sign_up` failed: the intruder got in. Put back.
 
 ## How to verify
 
@@ -535,6 +624,27 @@ docker compose exec redis redis-cli keys '*throttle*'
 ```
 
 `make test`: 15 tests, OK.
+
+Slice 6 (needs `GOOGLE_OAUTH_*` in `.env`, and your Gmail as a test user in
+the Google console):
+
+```python
+# make exec — link your Gmail to olivia, verified, so her password survives
+from django.contrib.auth import get_user_model
+from allauth.account.models import EmailAddress
+olivia = get_user_model().objects.get(username="olivia")
+olivia.email = "YOUR-GMAIL@gmail.com"
+olivia.save()
+EmailAddress.objects.update_or_create(
+    user=olivia, email=olivia.email,
+    defaults={"verified": True, "primary": True},
+)
+```
+
+Then at http://localhost:5173: **Sign in with Google** → back on the page as
+olivia (acme: owner). Log out → olivia / `deskly-demo` still works.
+`curl -s -o /dev/null -w "%{http_code}\n" localhost:8000/accounts/signup/`
+shows the closed page, and `make test`: 18 tests, OK.
 
 ## Commands used
 
@@ -633,3 +743,16 @@ authenticate(username="vera", password="deskly-demo")   # <User: vera> or None
   in `setUp`.
 - **`401` vs `403` depends on the order** of `DEFAULT_AUTHENTICATION_CLASSES`,
   not only on whether you're logged in.
+- **`redirect_uri_mismatch`** is almost never a Google outage. Compare the
+  `redirect_uri` in "error details" with the console list: port, `http` vs
+  `https`, `www.`, trailing slash.
+- **"I logged in and got a 404"** → the login probably worked and the "where
+  next" address is wrong. Check whether they're logged in first.
+- **"Google login worked, now my password doesn't"** → the account's email
+  wasn't verified, and allauth wiped the password on purpose.
+- **A shell object is a copy.** After `make seed` changes a user, call
+  `refresh_from_db()` before trusting `has_usable_password()`.
+- **`update_or_create` returned `False`** → the row already existed (allauth
+  writes `EmailAddress` rows during Google logins).
+- **Tests never use the real OAuth secret.** `override_settings` with a fake
+  client ID; CI has no `.env` secrets, and shouldn't.
