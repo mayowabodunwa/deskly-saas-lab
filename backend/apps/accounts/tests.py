@@ -3,6 +3,14 @@ from django.core.cache import cache
 from django.test import Client, TestCase, override_settings
 
 
+FAKE_GOOGLE = {
+    "google": {
+        "APP": {"client_id": "test-client-id", "secret": "test-secret"},
+        "SCOPE": ["profile", "email"],
+    }
+}
+
+
 class LogoutCsrfTests(TestCase):
     def setUp(self):
         self.user = get_user_model().objects.create_user("adam", password="pw")
@@ -60,3 +68,31 @@ class LoginThrottleTests(TestCase):
             "/api/auth/login/", wrong_login, content_type="application/json"
         )
         self.assertEqual(response.status_code, 429)        
+
+ 
+@override_settings(SOCIALACCOUNT_PROVIDERS=FAKE_GOOGLE)
+class GoogleSignInTests(TestCase):
+    def test_get_does_not_start_a_google_login(self):
+        # A plain link (GET) only shows a "Continue" page. Otherwise
+        # another website could start a login in your browser.
+        response = self.client.get("/accounts/google/login/")
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("Location", response.headers)
+
+    def test_post_sends_the_browser_to_google_with_our_callback(self):
+        response = self.client.post("/accounts/google/login/")
+        self.assertEqual(response.status_code, 302)
+        google_url = response.headers["Location"]
+        self.assertTrue(google_url.startswith("https://accounts.google.com/"))
+        self.assertIn("client_id=test-client-id", google_url)
+        # The address Google must send people back to (URL-encoded).
+        self.assertIn("accounts%2Fgoogle%2Flogin%2Fcallback%2F", google_url)
+
+    def test_nobody_can_sign_up(self):
+        users_before = get_user_model().objects.count()
+        self.client.post("/accounts/signup/", {
+            "username": "intruder",
+            "password1": "a-long-Password-123",
+            "password2": "a-long-Password-123",
+        })
+        self.assertEqual(get_user_model().objects.count(), users_before)       

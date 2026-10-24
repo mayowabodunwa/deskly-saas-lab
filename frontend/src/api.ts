@@ -1,6 +1,6 @@
 // Read one cookie by name, e.g. getCookie("csrftoken").
 // document.cookie looks like: "csrftoken=abc123; theme=dark"
-function getCookie(name: string) {
+export function getCookie(name: string) {
   for (const cookie of document.cookie.split("; ")) {
     const [key, value] = cookie.split("=");
     if (key === name) {

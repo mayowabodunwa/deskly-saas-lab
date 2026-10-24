@@ -25,6 +25,10 @@ INSTALLED_APPS = [
     "apps.organizations",
     "apps.tickets",
     "apps.accounts",
+    "allauth",
+    "allauth.account",
+    "allauth.socialaccount",
+    "allauth.socialaccount.providers.google",
 ]
 
 MIDDLEWARE = [
@@ -35,6 +39,7 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "allauth.account.middleware.AccountMiddleware",
 ]
 
 ROOT_URLCONF = "config.urls"
@@ -91,3 +96,26 @@ CACHES = {
         "LOCATION": REDIS_URL,
     }
 }
+
+AUTHENTICATION_BACKENDS = [
+    "django.contrib.auth.backends.ModelBackend",            # username + password (Slice 1)
+    "allauth.account.auth_backends.AuthenticationBackend",  # allauth's logins
+]
+
+ACCOUNT_ADAPTER = "apps.accounts.adapters.NoSignupAdapter"
+LOGIN_REDIRECT_URL = "/"
+
+SOCIALACCOUNT_PROVIDERS = {
+    "google": {
+        "APP": {
+            "client_id": os.environ.get("GOOGLE_OAUTH_CLIENT_ID", ""),
+            "secret": os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", ""),
+        },
+        "SCOPE": ["profile", "email"],   # only name + email, nothing else
+    }
+}  
+
+# Google checks emails, so a Google email can log into the Deskly user with that email.
+SOCIALACCOUNT_EMAIL_AUTHENTICATION = True
+# ...and remember that link, so it still works if the email changes later.
+SOCIALACCOUNT_EMAIL_AUTHENTICATION_AUTO_CONNECT = True

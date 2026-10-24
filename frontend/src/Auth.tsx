@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { getJson, postJson } from "./api";
+import { getCookie, getJson, postJson } from "./api";
 
 // The shape of the answer from /api/me/
 type Membership = { org: string; role: string };
@@ -11,6 +11,7 @@ export default function Auth() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
+  const [csrfToken, setCsrfToken] = useState("");
 
   // Ask Deskly "who am I?" and remember the answer.
   async function checkWhoIAm() {
@@ -24,7 +25,13 @@ export default function Auth() {
 
   // When the page opens: get a CSRF token, then check if we're logged in.
   useEffect(() => {
-    getJson("/api/auth/csrf/").then(checkWhoIAm);
+    async function start() {
+      await getJson("/api/auth/csrf/");
+      // The Google form below needs the token as a value, so keep a copy.
+      setCsrfToken(getCookie("csrftoken"));
+      await checkWhoIAm();
+    }
+    start();
   }, []);
 
   async function logIn() {
@@ -72,6 +79,14 @@ export default function Auth() {
       <input placeholder="password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
       <button onClick={logIn}>Log in</button>
       <p style={{ color: "crimson" }}>{error}</p>
+
+      {/* A real form, not fetch: the whole page has to go to Google and back.
+          allauth only starts a Google login on a POST with the CSRF token,
+          so another website can't start one in your browser. */}
+      <form method="post" action="/accounts/google/login/">
+        <input type="hidden" name="csrfmiddlewaretoken" value={csrfToken} />
+        <button type="submit">Sign in with Google</button>
+      </form>
     </section>
   );
 }
