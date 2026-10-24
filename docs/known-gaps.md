@@ -498,5 +498,59 @@ Found in Phase 2, Slice 4 (2026-10-23).
 
 ---
 
+## 🟠 GAP-015 — The login limit counts per IP address only
+
+**Where:** `backend/apps/accounts/throttles.py` — `LoginRateThrottle`
+(`AnonRateThrottle`, 5/minute)
+
+The limit counts attempts per **IP address**. That has two weak spots:
+
+- **Shared IPs lock out together.** Everyone in one office, or behind one
+  mobile carrier, has the same public IP. One person typing wrong locks out
+  all of them. Behind a load balancer it's worse: every request comes from the
+  balancer's IP unless DRF is told to read `X-Forwarded-For`
+  (`NUM_PROXIES`), so one bad guesser locks out every user.
+- **Many IPs get around it.** An attacker with 1,000 IPs gets 5,000 guesses a
+  minute, and can spread them across one victim's account.
+
+**What production does:** adds a second limit **per username** (say 10 failed
+attempts an hour per account, whatever the IP), sets `NUM_PROXIES` to match
+the real proxy setup, and often adds a CAPTCHA or an emailed unlock after
+repeated failures. Libraries like `django-axes` do the per-account part.
+
+**Trigger to close:** Phase 7, when Deskly first runs behind a load balancer
+(`NUM_PROXIES` becomes required then, or every user shares one IP). The
+per-username limit before any real user.
+
+Found in Phase 2, Slice 5 (2026-10-24).
+
+---
+
+## 🟡 GAP-016 — JWTs can't be cancelled before they expire
+
+**Where:** `backend/config/settings.py` — `SIMPLE_JWT` (no blacklist app, no
+refresh rotation)
+
+A session can be ended at once by deleting its row (Slice 1). A JWT can't:
+the server checks the signature and looks nothing up, so a stolen access token
+works until it expires (15 minutes), and a stolen refresh token keeps making
+new access tokens for a day. Logout and password changes don't affect either.
+
+**What production does:** turns on SimpleJWT's token blacklist
+(`rest_framework_simplejwt.token_blacklist` in `INSTALLED_APPS`) with
+`ROTATE_REFRESH_TOKENS` and `BLACKLIST_AFTER_ROTATION`, so each refresh token
+works once and can be cancelled. The 15-minute access lifetime stays as the
+limit on a stolen access token.
+
+**Why it's 🟡:** no script uses tokens yet, and the browser doesn't use JWT
+at all.
+
+**Trigger to close:** when the first real script or API client gets tokens
+(Phase 6, the public API), or earlier if "log out everywhere" is needed.
+
+Found in Phase 2, Slice 5 (2026-10-24).
+
+---
+
 <!-- New gaps: assign the next GAP-NNN, pick a severity, and always fill in the
      trigger. A gap with no trigger becomes permanent by accident. -->

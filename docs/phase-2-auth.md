@@ -36,6 +36,17 @@ between `401` ("who are you?") and `403` ("I know who you are, and no").
 - **The server decides, not the cookie.** A cookie with no matching note is
   just a random string. Deleting the note logs the person out at once, even
   though they still hold the cookie.
+- **JWT (JSON Web Token)**: the wristband model. Instead of a note on the
+  server, the server hands out a signed token that says "this is adam, valid
+  until 21:20". The client sends it as `Authorization: Bearer <token>`. The
+  server checks the signature; it looks nothing up. The flip side: it can't
+  take a wristband back before it expires (GAP-016).
+- **Access and refresh tokens**: the access token is short-lived (15 minutes)
+  and goes on every request. The refresh token lives longer (1 day) and is
+  used only to get a new access token, without sending the password again.
+- **Throttling (rate limiting)**: a limit on how often someone can call an
+  endpoint. Over the limit, the answer is `429 Too Many Requests` with a
+  `Retry-After` header. On login it stops password guessing at scale.
 
 ## Architecture decisions & trade-offs
 
@@ -106,6 +117,10 @@ cookie). So DRF sends 403, with the body
 Left as-is on purpose. In Slice 5, JWT login *does* send
 `WWW-Authenticate: Bearer`, and the order we list the methods in will decide
 401 or 403. The choice belongs there.
+
+**Decided in Slice 5:** JWT is listed first, so anonymous requests now get
+`401` with `WWW-Authenticate: Bearer`. See "Slice 5 — the order of the login
+methods".
 Docs: <https://www.django-rest-framework.org/api-guide/authentication/#unauthorized-and-forbidden-responses>
 
 ### Slice 2 — members only: two questions, one lookup
@@ -245,6 +260,99 @@ works, but it papers over the mismatch rather than removing it, and adds a
 setting to keep in step. Production will still need the setting if the SPA
 and the API ever live on different domains.
 
+### Slice 5 — tokens for scripts, sessions for the browser
+
+A script can't easily juggle cookies and CSRF tokens, so it gets JWT instead.
+`djangorestframework-simplejwt` provides both endpoints; we wrote no views:
+
+- **`POST /api/auth/token/`** with a username and password returns an
+  `access` token (15 minutes) and a `refresh` token (1 day).
+- **`POST /api/auth/token/refresh/`** with the refresh token returns a new
+  access token.
+
+The React app keeps using the session cookie. The page never touches a JWT,
+so there's no token in `localStorage` for injected JavaScript to steal. JWT
+requests also need no CSRF token: the browser never attaches an
+`Authorization` header by itself, so `evil.com` can't borrow it.
+
+Lifetimes are in `SIMPLE_JWT` in `settings.py`. A short access token is the
+main defence against a stolen one, because there's no way to cancel it early
+(GAP-016).
+
+### Slice 5 — the order of the login methods
+
+```python
+"DEFAULT_AUTHENTICATION_CLASSES": [
+    "rest_framework_simplejwt.authentication.JWTAuthentication",   # checked 1st
+    "rest_framework.authentication.SessionAuthentication",         # checked 2nd
+],
+```
+
+DRF tries each method in turn: a `Bearer` header, then a session cookie, then
+the caller is anonymous. **First doesn't mean "main"**: the browser sends no
+header, so it skips JWT and logs in by cookie, exactly as before.
+
+The order only matters for an anonymous request, where DRF asks the **first**
+method what to say. JWT can say "send a Bearer token", so the answer is `401`
+with `WWW-Authenticate: Bearer`. With sessions first it was `403` (Slice 1).
+Two tests that pinned the old `403` now expect `401`.
+
+Listing the methods also drops DRF's default Basic auth (a password on every
+request), which nothing used.
+
+### Slice 5 — throttling the password endpoints
+
+Both endpoints that accept a password share one limit:
+
+```python
+# apps/accounts/throttles.py
+class LoginRateThrottle(AnonRateThrottle):
+    scope = "login"          # rate comes from DEFAULT_THROTTLE_RATES: 5/minute
+```
+
+`login_view` gets `@throttle_classes([LoginRateThrottle])`; the token view
+gets `TokenObtainPairView.as_view(throttle_classes=[LoginRateThrottle])`.
+Same scope, so one counter per IP address covers both: 3 guesses on one and
+3 on the other is still 6.
+
+Only the password endpoints are throttled. Refresh, `/api/me/` and the ticket
+endpoints aren't: they need a valid login already, so guessing gets nothing.
+
+**Where the counter lives.** DRF keeps it in Django's cache. With no `CACHES`
+setting, that's `LocMemCache`, which is the memory of one Python process: a
+restart wipes it, and each gunicorn worker keeps its own count, so 4 workers
+means about 20 tries a minute, not 5. `CACHES` now points at the Redis we
+already run (Django 5.1's built-in `RedisCache`, using `REDIS_URL`). One
+counter for every process, and it survives a restart. The trade-off is that
+login now needs Redis to be up.
+
+**Tests use their own cache.** `LoginThrottleTests` has
+`@override_settings(CACHES=<LocMemCache>)` and `cache.clear()` in `setUp`.
+Otherwise the counter would carry from test to test, and tests and dev curls
+would share one Redis counter.
+
+### Slice 5 — the login view ignores the login cookie
+
+```python
+@api_view(["POST"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+@throttle_classes([LoginRateThrottle])
+def login_view(request):
+```
+
+`AnonRateThrottle` counts **anonymous** callers only. Without
+`@authentication_classes([])`, a caller logged in as themselves (mallory)
+looked logged in, so the throttle skipped her, while the body asked about
+someone else (`"username": "olivia"`). She could guess olivia's password with
+no limit. The throttle looked at **who is sending**; the risk is **who is
+being guessed**.
+
+With no authentication classes, the view never reads the cookie, so every
+caller is anonymous and counted by IP. SimpleJWT's token view already works
+this way. Refusing logins from logged-in callers was the other option; it
+would break switching accounts on a shared computer.
+
 ## Build slices
 
 - [x] Slice 1 — **Log in with a session.** Demo users with memberships; a
@@ -256,8 +364,9 @@ and the API ever live on different domains.
 - [x] Slice 4 — **CSRF for the web app.** The browser proves a write came from
       Deskly's own pages. Plus logout and a login box in the React app.
       Done 2026-10-23.
-- [ ] Slice 5 — **Tokens for scripts (JWT).** Short-lived access tokens plus
-      refresh, and login throttling.
+- [x] Slice 5 — **Tokens for scripts (JWT).** Short-lived access tokens plus
+      refresh, and login throttling. Anonymous requests now get 401.
+      Done 2026-10-24.
 - [ ] Slice 6 — **Sign in with Google (OAuth).** Optional; needs a Google Cloud
       project.
 
@@ -315,6 +424,22 @@ Each slice: build it → break it on purpose → diagnose from symptoms → fix.
    showed `CSRF Failed: Origin checking failed - http://localhost:5173 does not
    match any trusted origins.` The token was fine; the dev proxy was rewriting
    the Host. Fixed with `changeOrigin: false`.
+
+### Slice 5 — the breaks
+
+1. **Six wrong passwords.** `400` five times, then `429` with `Retry-After`.
+   The right password also got `429` until the minute was up: the limit
+   doesn't know who's typing.
+2. **Restart while locked out.** `docker compose restart backend`, and the
+   lock was gone. The learner diagnosed it before being told: nothing was
+   saving the count. It was in `LocMemCache`, the process's own memory.
+   Fixed with `CACHES` on Redis; after that, still `429` after a restart.
+3. **Throttle removed from `login_view`.** The first test failed with
+   `400 != 429`. Put back.
+4. **Logged in, then guessing.** Found while checking before close-out, in
+   the Django shell: logged in as adam, 8 wrong logins for olivia gave `400`
+   eight times, never `429`. The second test was written first and failed
+   (`400 != 429`), then `@authentication_classes([])` made it pass.
 
 ## How to verify
 
@@ -384,6 +509,32 @@ curl -i -b /tmp/adam-cookies.txt -H "X-CSRFToken: $CSRF" -X POST \
 
 In the browser: http://localhost:5173 → log in as adam → Log out → back to the
 form, no red message. `make test`: 13 tests, OK.
+
+Slice 5 (since this slice, the anonymous `403`s in the Slice 1 and 2 blocks
+above are `401`):
+
+```bash
+curl -i http://localhost:8000/api/me/
+# 401, WWW-Authenticate: Bearer realm="api"
+
+curl -s -H "Content-Type: application/json" \
+  -d '{"username": "adam", "password": "deskly-demo"}' \
+  http://localhost:8000/api/auth/token/
+# {"refresh":"eyJ...","access":"eyJ..."}
+curl -i -H "Authorization: Bearer <access>" http://localhost:8000/api/me/      # 200, adam
+
+for i in 1 2 3 4 5 6; do
+  curl -s -o /dev/null -w "%{http_code}\n" -X POST http://localhost:8000/api/auth/login/ \
+    -H "Content-Type: application/json" -d '{"username":"olivia","password":"wrong"}'
+done
+# 400 400 400 400 400 429
+
+docker compose restart backend      # then the loop again: still 429
+docker compose exec redis redis-cli keys '*throttle*'
+# ":1:throttle_login_<your IP>"  (scope + IP; gone after a minute)
+```
+
+`make test`: 15 tests, OK.
 
 ## Commands used
 
@@ -470,3 +621,15 @@ authenticate(username="vera", password="deskly-demo")   # <User: vera> or None
 - **Testing CSRF:** Django's test client skips it unless built with
   `Client(enforce_csrf_checks=True)`. Headers are passed as
   `HTTP_X_CSRFTOKEN=...`.
+- **`429` isn't a wrong password.** It means too many tries; the person just
+  waits for `Retry-After` seconds. If a whole office is locked out at once,
+  suspect a shared IP address (GAP-015).
+- **A limit that resets on restart** is stored in process memory. Find where
+  the counter lives before trusting the number.
+- **Check what a limit counts.** `AnonRateThrottle` skips logged-in callers.
+  On a login endpoint that was a hole; `@authentication_classes([])` closes it.
+- **A rate limit test that passes alone but fails in a full run** usually
+  means the counter is shared. Give the test class its own cache and clear it
+  in `setUp`.
+- **`401` vs `403` depends on the order** of `DEFAULT_AUTHENTICATION_CLASSES`,
+  not only on whether you're logged in.

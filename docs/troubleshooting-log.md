@@ -27,6 +27,82 @@ character.
 
 ---
 
+## 2026-10-24 — `GOTCHA` — Auth — A logged-in user could guess passwords with no limit
+
+**Symptom**
+Login was throttled to 5 a minute, and an anonymous curl loop got `429` on
+the sixth try. But logged in as adam, 8 wrong logins for olivia in a row gave:
+
+```
+[400, 400, 400, 400, 400, 400, 400, 400]
+```
+
+Never `429`.
+
+**What it means**
+The throttle didn't count this caller at all.
+
+**Root cause**
+The throttle was `AnonRateThrottle`, which only counts **anonymous** callers.
+`login_view` used the default login methods, so DRF read adam's session
+cookie before the view ran and saw a logged-in user. The throttle skipped
+him, even though the body asked about someone else. An attacker could sign
+up, log in as themselves, then guess anyone's password freely.
+
+**Fix**
+`@authentication_classes([])` on `login_view`. The view no longer reads the
+cookie, so every caller is anonymous and counted by IP. SimpleJWT's token
+view already worked this way, so `/api/auth/token/` never had the hole. Test:
+`test_logged_in_caller_is_throttled_too`.
+
+**Lesson**
+Check what a limit actually counts. "5 per minute" really meant "5 per minute
+for people who aren't logged in". On a login endpoint, who's sending doesn't
+matter; who's being guessed does.
+
+---
+
+## 2026-10-24 — `GOTCHA` — Auth — The login lockout disappeared when the backend restarted
+
+**Symptom**
+After 5 wrong passwords, login returned `429 Too Many Requests`. Then
+`docker compose restart backend`, and the next login attempt was let straight
+through.
+
+**What it means**
+The count of attempts was lost on restart. Nothing was saving it.
+
+**Root cause**
+DRF keeps throttle counts in Django's cache. With no `CACHES` setting, Django
+uses `LocMemCache`, which is the memory of a single Python process. A restart
+starts a new process with empty memory. In production it's worse: each
+gunicorn worker has its own memory and its own count, so the real limit is
+5 × the number of workers.
+
+**Fix**
+Point the cache at Redis, which every process shares and which doesn't
+restart with the backend:
+
+```python
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.redis.RedisCache",
+        "LOCATION": REDIS_URL,
+    }
+}
+```
+
+After that, still `429` after a restart.
+
+**Lesson**
+For any limit or lock, ask where the counter lives. Memory inside one
+process is lost on restart and isn't shared between processes.
+
+*Support angle:* "the lockout cleared itself" or "the limit works on one
+server but not another" points at state kept in the wrong place.
+
+---
+
 ## 2026-10-23 — `GOTCHA` — Auth / Frontend — Logout worked with curl and failed in the browser
 
 **Symptom**
@@ -224,6 +300,9 @@ For anonymous requests it picks the status from the first method only. A real
 **Fix**
 None yet, on purpose. Slice 5 adds JWT, which does send
 `WWW-Authenticate: Bearer`; the order of the login methods will decide it then.
+
+*Resolved 2026-10-24 (Slice 5):* JWT is listed first, so this now returns
+`401` with `WWW-Authenticate: Bearer realm="api"`.
 
 **Lesson**
 Read the body, not just the number. A support engineer who stops at "403"
