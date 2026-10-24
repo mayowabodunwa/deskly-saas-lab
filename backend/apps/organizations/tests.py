@@ -29,4 +29,4 @@ class MembersOnlyTests(TestCase):
 
     def test_anonymous_is_refused(self):
         response = self.client.get("/api/orgs/acme/")
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 401)
