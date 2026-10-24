@@ -39,7 +39,7 @@ Each phase of the build maps to a real category of support ticket.
 |---|---|---|---|
 | 0 | Foundation — Docker, Django, Postgres, Redis | *"The site is down."* Which tier is actually broken — frontend, backend, or database? | 📝 [draft](00-the-site-is-down.mdx) |
 | 1 | Domain model & multi-tenancy | *"My data is missing"* / *"I can see another company's data."* One is a bug, one is a breach | 📝 [draft](01-whose-data-is-this.mdx) |
-| 2 | Auth — sessions, JWT, OAuth, roles | *"I can't log in."* The biggest support category. 401 vs 403: "who are you?" vs "I know you, and no" | ⬜ not written |
+| 2 | Auth — sessions, JWT, OAuth, roles | *"I can't log in."* The biggest support category. 401 vs 403: "who are you?" vs "I know you, and no" | 📝 [draft](02-i-cant-log-in.mdx) |
 | 3 | Admin, impersonation, feature flags | Your own tooling. Impersonation is how you see what the customer sees; flags explain *"why does it work for them and not me?"* | ⬜ not written |
 | 4 | Async — Celery, exports, scheduled email | *"My export never arrived."* Learning that queued is not the same as lost | ⬜ not written |
 | 5 | AI assistant + MCP server | Assisted triage — and knowing its failure modes so you don't trust it blindly | ⬜ not written |

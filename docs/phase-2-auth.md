@@ -1,6 +1,7 @@
 # Phase 2 — Auth: logins, roles and tokens
 
-**Status:** 🚧 In progress (branch `phase-2-auth`, started 2026-10-07)
+**Status:** ✅ All six slices built and verified 2026-10-24 (branch
+`phase-2-auth`, started 2026-10-07). Lesson 2 drafted; PR to `main` open.
 
 **Goal:** Deskly knows **who** is making each request, and only lets them see
 and do what their company and role allow.

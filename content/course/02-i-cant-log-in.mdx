@@ -1,0 +1,999 @@
+---
+title: "Lesson 2: \"I can't log in\". Who are you, and what are you allowed to do?"
+description: "The biggest category of support ticket, taken apart: how logins really work, why 401, 403, 404 and 429 mean four different things, and how to tell them apart from the outside."
+pubDate: 2026-10-24
+lesson: 2
+phase: 2
+tags: [authentication, authorization, sessions, csrf, jwt, oauth, rate-limiting, django]
+ticket: "I can't log in. It just says forbidden."
+sidebar:
+  label: "2 · I can't log in"
+  order: 2
+draft: true
+---
+
+import Reveal from "../../site/src/components/Reveal.astro";
+import Quiz from "../../site/src/components/Quiz.astro";
+import Checklist from "../../site/src/components/Checklist.astro";
+
+## The ticket
+
+Three tickets arrive in the same hour. All three say the same thing.
+
+```
+Subject: can't log in
+From: Agent, Acme Corp
+
+I can't get in. It just says forbidden. I've tried three times.
+```
+
+```
+Subject: login broken??
+From: Agent, Globex
+
+I'm logged in fine but when I open the Acme workspace link my
+manager sent me it says "Not found". Is the site down?
+```
+
+```
+Subject: locked out
+From: Owner, Acme Corp
+
+It keeps telling me to try again later. I KNOW my password is right.
+```
+
+**What you can tell from these alone:** that "I can't log in" isn't one
+problem. It's a phrase customers use for at least four different ones:
+
+- the system doesn't know who they are,
+- it knows who they are and won't let them do something,
+- it's hiding a page they're not allowed to know exists,
+- or it's making them wait.
+
+Each has a different cause, a different fix, and a different status code. By
+the end of this lesson you'll have built all four answers into Deskly, broken
+each one on purpose, and you'll be able to tell them apart from a screenshot.
+
+## Why this part of the system exists
+
+At the end of [Lesson 1](01-whose-data-is-this.mdx), Deskly had a serious
+hole: anyone could read any company's tickets just by typing its name into
+the address. The wall kept companies apart in the code, but it never asked
+*who's asking*.
+
+Think of an **office building** again. Lesson 1 gave every company its own
+floor. This lesson adds the front desk:
+
+1. **Reception asks for ID.** "Who are you?" No ID, no entry. That's
+   **authentication**.
+2. **Your badge only opens your company's floor.** You can be a real,
+   checked-in visitor and still not be allowed onto Globex's floor. That's
+   **authorization**.
+3. **Inside your floor, your job decides which rooms you can enter.** The
+   intern can read the files but not sign the contracts. That's **roles**.
+4. **Reception slows down anyone who keeps guessing badge numbers.** That's
+   **rate limiting**.
+
+Every "I can't log in" ticket is a problem at one of those four steps. The
+skill this lesson teaches is working out *which* step, quickly.
+
+## Concepts you need
+
+- **Authentication (AuthN)**: working out *who* is making a request. "Show
+  me your ID."
+- **Authorization (AuthZ)**: deciding what that person is *allowed* to do.
+  "Your ID is fine, but this isn't your floor."
+- **Password hash**: a scrambled fingerprint of a password that can't be
+  turned back into the password. Deskly stores the fingerprint, never the
+  password. At login it fingerprints what you typed and compares.
+- **Salt**: a random string mixed in before hashing, different for every
+  user. Two people with the same password get different fingerprints.
+- **Cookie**: a small piece of text a website asks your browser to keep and
+  send back on every visit to that site.
+- **Session**: the coat-check model of login. At login, the server writes a
+  note ("ticket `olr9…` belongs to adam") in its database and gives your
+  browser the ticket number as a cookie. Your browser shows the ticket on
+  every request; the server looks up the note.
+- **Status code**: the three-digit number at the start of every web response.
+  `200` means OK. The 400s mean "the problem is on your side". This lesson is
+  mostly about four of them: `401`, `403`, `404` and `429`.
+- **CSRF (cross-site request forgery)**: a trick where another website makes
+  *your* browser send a request to a site you're logged into. The browser
+  attaches your cookie automatically, so the request looks like you.
+- **Token (JWT)**: the wristband model of login. Instead of a note on the
+  server, the server hands out a signed pass that says "this is adam, valid
+  for 15 minutes". Scripts use these instead of cookies.
+- **OAuth**: one site trusting another to say who someone is. "Sign in with
+  Google": you prove who you are *to Google*, and Google vouches for you to
+  Deskly. Deskly never sees your Google password.
+- **Rate limiting (throttling)**: a limit on how often someone can do
+  something, like "5 login attempts a minute".
+
+## Build it
+
+This lesson builds on [Lesson 1](01-whose-data-is-this.mdx): Deskly running in
+Docker, with two companies (Acme and Globex) and their tickets. The build
+happens in six slices. The code lives in a new app called `accounts`
+(Django's word for a folder of related code), plus a small file of access
+rules in `organizations`.
+
+### Slice 1: a real login
+
+First, people. The seed command from Lesson 1 now also creates four demo
+users, each one there to test one rule later:
+
+| User | Company | Role | Here to test |
+|---|---|---|---|
+| olivia | Acme | owner | owners can do everything |
+| adam | Acme | agent | agents can create tickets |
+| vera | Acme | viewer | viewers can read but not write |
+| gary | Globex | agent | he can't see Acme at all |
+
+All four share the password `deskly-demo`. Passwords are set with
+`set_password()`, which stores the salted fingerprint, never the password:
+
+```python
+user, _ = User.objects.get_or_create(username=username)
+if not user.check_password(DEMO_PASSWORD):
+    user.set_password(DEMO_PASSWORD)
+    user.save()
+```
+
+The `if` line looks fussy. It's there because of a real bug, which is
+[Break 1](#break-1-i-keep-getting-logged-out).
+
+Then two endpoints, in `backend/apps/accounts/views.py`. The login:
+
+```python
+@api_view(["POST"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+@throttle_classes([LoginRateThrottle])
+def login_view(request):
+    user = authenticate(
+        request,
+        username=request.data.get("username"),
+        password=request.data.get("password"),
+    )
+    if user is None:
+        return Response(
+            {"detail": "Invalid username or password."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    login(request, user)
+    return Response({"username": user.username})
+```
+
+(The `@authentication_classes` and `@throttle_classes` lines arrive in Slice 5.
+They're shown here so you see the final version once.)
+
+- **`authenticate()`** fingerprints the password and compares. It returns the
+  user, or `None`.
+- **`login()`** writes the coat-check note to the `django_session` table and
+  tells the browser to keep a cookie called `sessionid`.
+- **One vague error for both mistakes.** "Invalid username or password" never
+  says *which* half was wrong. "No such user" would let anyone find out which
+  usernames exist.
+
+And "who am I?", which the React app calls when it opens:
+
+```python
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def me(request):
+    memberships = request.user.memberships.select_related("organization")
+    return Response({
+        "username": request.user.username,
+        "memberships": [
+            {"org": m.organization.slug, "role": m.role}
+            for m in memberships
+        ],
+    })
+```
+
+`IsAuthenticated` means "refuse anyone who isn't logged in". This one
+endpoint is the most useful tool support has: it tells you who the system
+thinks you are, and where you belong.
+
+The session cookie is `HttpOnly`, which means JavaScript on the page can't
+read it. If an attacker ever gets their own code onto a Deskly page, it still
+can't steal your login.
+
+### Slice 2: members only
+
+Now the hole from Lesson 1. Every request to a company's address has to
+answer a second question: "does *this person* belong to *this company*?"
+
+In `backend/apps/organizations/access.py`:
+
+```python
+def get_membership_or_404(request, slug):
+    """Return the user's membership in this org, or 404 if they have none."""
+    return get_object_or_404(
+        Membership.objects.select_related("organization"),
+        organization__slug=slug,
+        user=request.user,
+    )
+```
+
+One lookup answers both questions: find a membership row for **this company
+and this person**. No row means `404 Not Found`. Every company view now
+starts with it:
+
+```python
+@api_view(["GET", "POST"])
+@permission_classes([IsAuthenticated])
+def ticket_list(request, slug):
+    membership = get_membership_or_404(request, slug)
+    organization = membership.organization
+    ...
+```
+
+**Why `404` and not `403 Forbidden`?** `403` would mean "this company exists,
+but you can't see it". Then anyone could type in company names (`tesla`,
+`stripe`) and learn Deskly's customer list from the answers. With `404`, a
+company you don't belong to and a company that doesn't exist look exactly the
+same. A test compares the two responses to keep it that way.
+
+This is the second ticket from the top of the lesson. Gary isn't broken. He's
+at Globex, and the link he was sent is for Acme.
+
+### Slice 3: roles
+
+Belonging to a company isn't the end of it. Vera is a **viewer**: she can read
+tickets, but she shouldn't be able to create them.
+
+```python
+WRITE_ROLES = {Membership.Role.OWNER, Membership.Role.AGENT}
+
+def require_write_role(membership):
+    """Stop viewers from changing anything. Raises 403."""
+    if membership.role not in WRITE_ROLES:
+        raise PermissionDenied("Viewers can read tickets but not change them.")
+```
+
+`ticket_list` calls it on a write, **before** anything is saved:
+
+```python
+    if request.method == "POST":
+        require_write_role(membership)
+        serializer = TicketSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save(organization=organization)
+```
+
+Two details matter:
+
+- **The message says why.** "Viewers can read tickets but not change them"
+  turns the ticket "it just says forbidden" into a one-line answer.
+- **"Before anything is saved" is the whole point.** See
+  [Break 2](#break-2-a-no-that-still-said-yes).
+
+The checks now run in a fixed order, and each one has its own answer:
+
+```
+logged in?          no  → 401  "who are you?"
+member of company?  no  → 404  "there's nothing here for you"
+role allowed?       no  → 403  "I know you, and no"
+                    yes → 200 / 201
+```
+
+A stranger never gets as far as the role check, so they learn nothing about
+who has which job inside a company.
+
+### Slice 4: CSRF, so other websites can't use your login
+
+Here's the catch with cookies. Adam is logged into Deskly in one tab. In
+another tab he opens a funny-cat website. Hidden in that page is a form that
+quietly sends:
+
+```
+POST http://deskly/api/auth/logout/
+```
+
+**The browser attaches Adam's Deskly cookie automatically**, because that's
+what cookies do. Deskly sees a valid login and logs him out. Swap "log out"
+for "delete a ticket" and it stops being funny.
+
+The cookie proves which **browser** sent the request. It doesn't prove which
+**website** told the browser to send it. CSRF protection adds that missing
+proof, with two checks Django makes on every logged-in write:
+
+| Check | Question | Why the cat website fails it |
+|---|---|---|
+| **Token** | Did the request carry the secret `csrftoken` value in an `X-CSRFToken` header? | One website can't read another website's cookies, so it can't copy the value |
+| **Origin** | Does the browser's `Origin` label match Deskly's own address? | The browser labels the request with the cat website's address, and the site can't change that label |
+
+The cookie also has `SameSite=Lax`, which tells modern browsers not to send it
+on most requests started by other sites at all. Three locks; if one fails, the
+others hold.
+
+Two new endpoints make it work. `GET /api/auth/csrf/` hands the browser the
+token, and `POST /api/auth/logout/` ends the session. Logout is a `POST`
+because it changes something. As a `GET`, any site could log you out with an
+image tag.
+
+On the React side, every write goes through one function, in
+`frontend/src/api.ts`:
+
+```ts
+// Send data to Deskly. Every write carries the CSRF token.
+export function postJson(path: string, data?: object) {
+  return fetch(path, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-CSRFToken": getCookie("csrftoken"),
+    },
+    body: JSON.stringify(data ?? {}),
+  });
+}
+```
+
+One place sends the token, so no button can forget it.
+
+### Slice 5: tokens for scripts, and a limit on guessing
+
+**Tokens.** A script, such as a nightly report, can't easily juggle cookies and
+CSRF tokens. So it gets a **JWT** instead, from a library called SimpleJWT:
+
+```bash
+curl -s -H "Content-Type: application/json" \
+  -d '{"username": "adam", "password": "deskly-demo"}' \
+  http://localhost:8000/api/auth/token/
+# {"refresh":"eyJ...","access":"eyJ..."}
+
+curl -H "Authorization: Bearer <access>" http://localhost:8000/api/me/
+```
+
+The **access** token lasts 15 minutes and goes on every request. The
+**refresh** token lasts a day and is used only to get a new access token. The
+browser never touches these: it keeps using its cookie, so there's no token
+lying around in the page for injected code to steal.
+
+Adding JWT changed one other thing. In `settings.py`, the list of ways to log
+in is now explicit:
+
+```python
+"DEFAULT_AUTHENTICATION_CLASSES": [
+    "rest_framework_simplejwt.authentication.JWTAuthentication",   # checked 1st
+    "rest_framework.authentication.SessionAuthentication",         # checked 2nd
+],
+```
+
+When nobody is logged in, Django REST Framework asks the **first** method in
+the list what to say. Sessions can't tell a caller *how* to log in, so the
+answer used to be `403`, which is misleading. JWT can ("send a Bearer token"),
+so now it's a correct `401`:
+
+```
+HTTP/1.1 401 Unauthorized
+WWW-Authenticate: Bearer realm="api"
+{"detail":"Authentication credentials were not provided."}
+```
+
+"First" here doesn't mean "main". The browser sends no Bearer header, so it
+skips straight past JWT and logs in with its cookie as before.
+
+**Rate limiting.** Without a limit, anyone can try a million passwords a
+minute against `/api/auth/login/`. That's called **brute force** (guessing),
+or **credential stuffing** (trying passwords leaked from other sites). Both
+password endpoints now share one limit:
+
+```python
+# backend/apps/accounts/throttles.py
+class LoginRateThrottle(AnonRateThrottle):
+    scope = "login"
+```
+
+```python
+# settings.py
+"DEFAULT_THROTTLE_RATES": {
+    "login": "5/minute",
+},
+```
+
+The sixth try in a minute gets:
+
+```
+429 Too Many Requests
+Retry-After: 42
+```
+
+That's the third ticket from the top. The owner's password *is* right. She
+tried too many times, and she has to wait for the number of seconds in
+`Retry-After`.
+
+The count has to live somewhere every server process can see, so Deskly keeps
+it in **Redis** (the fast shared store from Lesson 0):
+
+```python
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.redis.RedisCache",
+        "LOCATION": REDIS_URL,
+    }
+}
+```
+
+Why that matters is [Break 4](#break-4-the-lockout-that-forgot).
+
+### Slice 6: sign in with Google
+
+The last slice lets people skip the password and use their Google account.
+OAuth works like this:
+
+```
+1. You click "Sign in with Google" on Deskly
+2. Deskly sends your browser to Google            "Deskly wants your name and email. Allow?"
+3. You log in AT GOOGLE and click Allow           (Deskly never sees your Google password)
+4. Google sends your browser back to Deskly       with a one-time code in the address
+5. Deskly's server swaps the code for your email  (server to server, using a secret)
+6. Deskly finds the user with that email          and logs them in with a normal session
+```
+
+Deskly uses a library, **django-allauth**, for all of this. OAuth is exactly
+the kind of code where home-made versions get small, serious security bugs,
+so nobody should write it from scratch.
+
+Setting it up has a part outside the code. In the Google Cloud console you
+register Deskly, and you get a **client ID** (public) and a **client secret**
+(which goes in `.env` and never in git). You also list the **redirect URI**:
+the exact address Google is allowed to send people back to in step 4.
+
+```
+http://localhost:5173/accounts/google/login/callback/
+```
+
+Google refuses any address that isn't on that list. That's a security check.
+The address receives the one-time code, so if any address were allowed, an
+attacker could make a login link that sends *your* code to *their* site.
+
+Two decisions shape how it behaves:
+
+- **Only existing users can sign in.** A stranger with a Google account would
+  belong to no company and see nothing, so sign-up is closed:
+
+  ```python
+  class NoSignupAdapter(DefaultAccountAdapter):
+      def is_open_for_signup(self, request):
+          return False
+  ```
+
+  An unknown Google account gets a "Sign Up Closed" page. New people will join
+  by invitation in a later lesson.
+- **Google's email decides which Deskly user you are.** That's only safe
+  because Google checks that you own an email before vouching for it. And as
+  [Break 5](#break-5-google-worked-now-the-password-doesnt) shows, Deskly has
+  to have checked it too.
+
+The button in the React app is a real HTML form that `POST`s, with the CSRF
+token in a hidden field. A plain link would let any website start a Google
+login in your browser without you noticing, which is the CSRF problem from
+Slice 4 again.
+
+## Verify it
+
+**You'll know it worked when** each kind of "no" gives its own status code,
+and the tests pass.
+
+```bash
+make seed
+
+# 1. Nobody logged in
+curl -i http://localhost:8000/api/me/
+# 401 Unauthorized, WWW-Authenticate: Bearer realm="api"
+
+# 2. Log in as gary (Globex) and keep his cookie
+curl -s -c /tmp/gary.txt -H "Content-Type: application/json" \
+  -d '{"username": "gary", "password": "deskly-demo"}' \
+  http://localhost:8000/api/auth/login/
+
+curl -i -b /tmp/gary.txt http://localhost:8000/api/orgs/globex/tickets/   # 200
+curl -i -b /tmp/gary.txt http://localhost:8000/api/orgs/acme/tickets/     # 404
+
+# 3. Log in as vera (Acme viewer) and try to write
+curl -s -c /tmp/vera.txt -H "Content-Type: application/json" \
+  -d '{"username": "vera", "password": "deskly-demo"}' \
+  http://localhost:8000/api/auth/login/
+CSRF=$(grep csrftoken /tmp/vera.txt | awk '{print $7}')
+curl -i -b /tmp/vera.txt -H "Content-Type: application/json" \
+  -H "X-CSRFToken: $CSRF" -d '{"subject": "Vera was here"}' \
+  http://localhost:8000/api/orgs/acme/tickets/
+# 403 {"detail":"Viewers can read tickets but not change them."}
+
+# 4. Six wrong passwords in a row
+for i in 1 2 3 4 5 6; do
+  curl -s -o /dev/null -w "%{http_code}\n" -X POST http://localhost:8000/api/auth/login/ \
+    -H "Content-Type: application/json" -d '{"username":"olivia","password":"wrong"}'
+done
+# 400 400 400 400 400 429
+```
+
+Then the tests:
+
+```bash
+make test
+```
+
+```
+..................
+----------------------------------------------------------------------
+Ran 18 tests in 6.892s
+
+OK
+```
+
+<Checklist id="l2-verify" items={[
+  "No login: <code>/api/me/</code> returns <code>401</code> with a <code>WWW-Authenticate</code> header",
+  "gary gets <code>200</code> on Globex's tickets and <code>404</code> on Acme's",
+  "vera gets <code>403</code> with a message that says why",
+  "The sixth wrong password returns <code>429</code>",
+  "In the React app, you can log in, log out, and sign in with Google",
+  "<code>make test</code> shows 18 dots and <code>OK</code>",
+]} />
+
+## Break it, then fix it
+
+Five breaks. Every one of them happened for real while building this, and
+every one of them is a support ticket someone, somewhere, is filing today.
+Each time, reason from **what you can see** before reading the cause.
+
+### Break 1: "I keep getting logged out"
+
+**Break it.** In `seed_demo.py`, remove the `if` so the password is set on
+every run:
+
+```python
+user.set_password(DEMO_PASSWORD)
+user.save()
+```
+
+Log in as adam, check `/api/me/` says adam, then run `make seed`.
+
+**What the customer sees:** they were working, and suddenly they're logged out.
+They log in again, and later it happens again. "I keep getting logged out."
+
+**What you see:** the same cookie that worked a minute ago now gets:
+
+```
+{"detail":"Authentication credentials were not provided."}
+```
+
+adam's password is still `deskly-demo`. Nobody touched his account.
+
+**Reason it through:**
+
+1. **Is the cookie still there?** Yes. The browser sent it. So the browser
+   didn't lose the login: the server stopped accepting it.
+2. **Does his password still work?** Yes. So nothing is wrong with the
+   account itself.
+3. **What happened at the moment it broke?** The seed ran. What does the seed
+   do to users?
+
+<Reveal label="Think it through first, then show the root cause">
+
+**Root cause:** `set_password()` makes a **new** fingerprint every time, because
+it mixes in a new random salt, even for the same password. Django keeps a
+copy of the fingerprint inside each session. When the stored one changes,
+Django assumes the password was changed, and a password change logs you out
+everywhere. That's a safety feature: if your password was stolen and you
+change it, the thief's session dies too.
+
+</Reveal>
+
+**Fix it:** put the `if not user.check_password(...)` back. Now the seed only
+touches a password that's actually wrong. Reseed, and adam stays logged in.
+
+**Why this failure mode is dangerous:** the user did nothing, and the cause is
+somewhere they can't see: a script, an import or a migration that rewrites the
+password column. "I keep getting logged out" tickets often point at a
+scheduled job, not the person.
+
+### Break 2: a "no" that still said yes
+
+**Break it.** In `ticket_list`, move `require_write_role(membership)` **below**
+`serializer.save(...)`. Then send vera's write from the Verify section again.
+
+**What the customer sees:** vera clicks "create ticket", gets an error that
+says viewers can't create tickets, shrugs, and moves on.
+
+**What you see:**
+
+```
+HTTP/1.1 403 Forbidden
+{"detail":"Viewers can read tickets but not change them."}
+```
+
+It looks like the rule works. Now look at Acme's ticket list.
+
+<Reveal label="Think it through first, then show the root cause">
+
+**Root cause:** the ticket was saved, and *then* the code said no. "Vera was
+here" is in Acme's list. The response tells you what the server *said*. It
+tells you nothing about what the server already *did*.
+
+</Reveal>
+
+**Fix it:** the check goes back above the save. The test for this rule checks
+**both** things: the `403`, and that no ticket exists afterwards. A test that
+only checked the status code would have passed with the bug in place.
+
+**Why this failure mode is dangerous:** the customer sees exactly the right
+error. A support engineer who trusts the error closes the ticket. Meanwhile,
+the data says otherwise.
+
+### Break 3: works with curl, fails in the browser
+
+This one wasn't planned. It happened.
+
+**What the customer sees:** in the React app, login works. Then they click
+**Log out** and get, in red:
+
+```
+CSRF Failed: Origin checking failed - http://localhost:5173 does not match any trusted origins.
+```
+
+**What you see:** the exact same logout, sent with curl and the same token,
+returns `204 No Content`. It works.
+
+**Reason it through:**
+
+1. **Same request, two results.** So the difference is in what's sent, not
+   what the server does with it. What does a browser add that curl doesn't?
+2. **Read the error.** It's not "token missing". The token passed. It's the
+   *Origin* check that failed.
+3. **Browsers add an `Origin` header to every write. curl doesn't.** Django
+   compares it with the address the request was sent to (the **Host**). So
+   what's the Host?
+
+<Reveal label="Think it through first, then show the root cause">
+
+**Root cause:** in development, the React app's server (Vite) passes `/api`
+requests on to the backend, like a receptionist forwarding a call. It was set
+to rewrite the Host to `backend:8000` on the way through. So Django saw a
+request labelled "from `localhost:5173`" addressed to `backend:8000`, which is
+exactly what a cross-site attack looks like.
+
+</Reveal>
+
+**Fix it:** one setting in `frontend/vite.config.ts`, `changeOrigin: false`,
+so the forwarder keeps the browser's Host. That's also what a real production
+proxy does, so development now behaves like production.
+
+**Why this failure mode is dangerous:** every curl test passes. The bug only
+exists in a real browser, which is where customers are.
+
+### Break 4: the lockout that forgot
+
+**Break it.** Before Redis was added, the throttle count lived in Django's
+default cache. Send six wrong passwords (`429` on the sixth), then:
+
+```bash
+docker compose restart backend
+```
+
+Try again.
+
+**What the customer sees:** nothing unusual. They were told to wait, and then
+they weren't.
+
+**What you see:** the lockout is gone. The next attempt gets `400`, not `429`.
+
+**Reason it through:**
+
+1. **What does a restart throw away?** Anything kept in the program's memory.
+2. **So where was the count kept?**
+
+<Reveal label="Think it through first, then show the root cause">
+
+**Root cause:** with no cache configured, Django keeps the count in the memory
+of one Python process. A restart starts a new process with empty memory. In
+production it's worse: servers run several processes at once, each with its
+own memory and its own count. With four processes, "5 a minute" really means
+about 20.
+
+</Reveal>
+
+**Fix it:** point the cache at Redis, which every process shares and which
+doesn't restart with the backend. Repeat the break: still `429` after the
+restart.
+
+**A second hole in the same limit.** While checking this, something worse
+turned up. Logged in as one user, eight wrong passwords for *another* user
+gave:
+
+```
+[400, 400, 400, 400, 400, 400, 400, 400]
+```
+
+Never `429`. The limit only counted people who **weren't** logged in, and an
+attacker can simply log in to their own account first. The fix was one line
+on the login view, `@authentication_classes([])`. It makes the view ignore the
+caller's own login, so everyone is counted. The limit had looked at *who's
+sending*, when the risk is *who's being guessed*.
+
+**Why this failure mode is dangerous:** a limit always looks like it works when
+you test it the obvious way. Ask where the counter lives, and **what it
+actually counts**.
+
+### Break 5: Google worked, now the password doesn't
+
+**Break it.** In the Django shell, give olivia your Gmail address the
+obvious way:
+
+```python
+olivia.email = "you@gmail.com"
+olivia.save()
+```
+
+Sign in with Google. It works: you're olivia. Now log out and log in as olivia
+with her password.
+
+**What the customer sees:** "Google login works, but my password stopped
+working."
+
+**What you see:** the password login fails, and in the shell:
+
+```python
+>>> olivia.has_usable_password()
+False
+```
+
+Her stored password now starts with `!`, which is Django's way of writing "no
+password can ever match this".
+
+**Reason it through:**
+
+1. **Nobody changed her password by hand.** So something did it automatically,
+   and it happened during the Google login.
+2. **Why would a login library *destroy* a password on purpose?** Think about
+   who might have set that password.
+
+<Reveal label="Think it through first, then show the root cause">
+
+**Root cause:** allauth did it deliberately. Imagine an attacker signs up
+*before you*, using *your* email address, and keeps the password. Nobody checks
+the email. Later you sign in with Google, Google confirms the email is yours,
+and you're logged into the attacker's account. Now you both have it. So when
+the Google email matches a user whose email Deskly never **verified**, allauth
+wipes the old password to lock that person out. Setting `olivia.email` by hand
+doesn't count as verified.
+
+</Reveal>
+
+**Fix it:** run `make seed` to restore the password, then record the email as
+verified in allauth's own email table:
+
+```python
+from allauth.account.models import EmailAddress
+EmailAddress.objects.update_or_create(
+    user=olivia, email=olivia.email,
+    defaults={"verified": True, "primary": True},
+)
+```
+
+Sign in with Google again, and the password survives. In a real product,
+nobody types this: an email becomes verified when the person clicks a link
+sent to it, or accepts an invitation.
+
+**Why this failure mode is dangerous:** it looks like a bug, and it's a
+security feature. A support engineer who "fixes" it by resetting the password
+and moving on hasn't found the real question: *was this email ever verified,
+and who set that password?*
+
+### Check yourself
+
+<Quiz
+  question="A logged-in user opens a link to another company's workspace and gets 404 Not Found. What's the most likely explanation?"
+  options={[
+    "The site is down",
+    "The company was deleted",
+    "They aren't a member of that company",
+    "Their session expired",
+  ]}
+  answer={2}
+>
+Deskly answers 404 for a company you don't belong to, on purpose, so nobody
+can test company names to learn the customer list. A deleted company also gives
+404, so check their memberships before you assume the worst. An expired session
+would give 401, not 404.
+</Quiz>
+
+<Quiz
+  question="A customer says: 'It says forbidden when I try to create a ticket, but I can see all the tickets fine.' What do you check first?"
+  options={[
+    "Whether they're logged in",
+    "Their role in that company",
+    "Whether the server is up",
+  ]}
+  answer={1}
+>
+They can read, so they're logged in (no 401) and a member (no 404). Being
+refused only on a write is the role check: they're probably a viewer. The 403
+message in Deskly says so directly.
+</Quiz>
+
+<Quiz
+  question="A customer gets 429 Too Many Requests and insists their password is correct. What do you tell them?"
+  options={[
+    "Reset their password",
+    "Wait for the time in Retry-After, then try once, carefully",
+    "Clear their cookies",
+  ]}
+  answer={1}
+>
+429 isn't a wrong password. It means too many attempts in a short time, and
+even the right password is refused until the limit resets. Resetting the
+password won't help. If a whole office is locked out at once, suspect that
+they all share one internet address.
+</Quiz>
+
+## Trade-offs & decisions
+
+**Sessions for the browser, tokens for scripts.**
+
+| Option | Good | Bad | Used for |
+|---|---|---|---|
+| **Session cookie** | The browser handles it. JavaScript can't read it. The server can end it instantly by deleting the note | The server stores a row per login. Writes need CSRF protection | ✅ the React app |
+| **JWT** | No lookup on every request. Easy for scripts. No CSRF needed | Can't be cancelled before it expires. Dangerous if stored where page scripts can read it | ✅ scripts and API clients |
+
+Many tutorials put a JWT in the browser's `localStorage`. Any script that gets
+onto the page can read `localStorage`, so one injected script steals the login.
+Deskly's browser login stays in an `HttpOnly` cookie for that reason.
+
+**`404` for "not a member", not `403`.** It costs support a little: the status
+alone doesn't say whether the person typed the wrong company or lacks a
+membership. That answer lives in the database, where only support can see it,
+not in a response anyone can read. That's where it belongs.
+
+**`401` vs `403`, decided by order.** The status for "nobody logged in" comes
+from whichever login method is listed first. Putting JWT first made it the
+correct `401`. It's a small setting with a big effect on support: a `403` that
+really meant "not logged in" sends people checking permissions instead of
+logging in.
+
+**A plain function for roles, not a permission class.** Django REST Framework
+has "permission classes" that run before a view. They run before the
+membership is looked up, so they'd have to look it up a second time. A
+function called inside the view reuses the membership Slice 2 already found.
+That's fine for a handful of views. It gets revisited when there are many.
+
+**Only existing users can use Google.** Opening sign-up would create users who
+belong to nothing, and email matching would need much more care. Closed
+sign-up plus invitations (later) is simpler and safer.
+
+## What actually broke for me
+
+Real errors from building this, quoted exactly as they appeared. Breaks 1, 3, 4
+and 5 above were all real too.
+
+**One capital letter took down every page.**
+
+```
+curl: (56) Recv failure: Connection reset by peer
+```
+
+Not an error page: the server hung up. The logs explained:
+
+```
+ImportError: cannot import name 'isAuthenticated' from 'rest_framework.permissions' (/usr/local/lib/python3.12/site-packages/rest_framework/permissions.py). Did you mean: 'IsAuthenticated'?
+```
+
+Python names are case-sensitive, and Django loads every view file at startup,
+so one bad import stops everything. **When the server hangs up, read the logs,
+not another curl.**
+
+**`403` that meant "not logged in".** Before Slice 5, calling `/api/me/` with no
+cookie gave:
+
+```
+HTTP/1.1 403 Forbidden
+{"detail":"Authentication credentials were not provided."}
+```
+
+The number said "forbidden", and the body said "I don't know who you are". The
+body was right. **Read the body, not just the number.**
+
+**New URLs that didn't exist.** The CSRF and logout endpoints went into the
+`organizations` app by mistake, and gave Django's "Page not found (404)". Every
+address in that app starts with `/api/orgs/`, and its `<slug>/` pattern would
+have treated `auth` as a company name anyway. **A `404` on a URL you just added:
+check which file it went into.**
+
+**Google said no.** Starting the Google login from the backend's own address
+(port 8000) instead of the React app (5173):
+
+```
+You can't sign in because this app sent an invalid request. You can try again later, or contact the developer about this issue.
+Error 400: redirect_uri_mismatch
+```
+
+My first guess was "the backend doesn't know how to log in with Google". It
+did: the browser had reached Google, and Google refused the return address,
+which said 8000 when only 5173 was registered. **Compare the `redirect_uri` in
+the error details with the list in the console.** It's nearly always a port,
+`http` vs `https`, `www.`, or a trailing slash.
+
+**Logged in, then a 404.** After choosing a Google account:
+
+```
+The current path, accounts/profile/, didn’t match any of these.
+```
+
+The login had worked. Django sends people to `/accounts/profile/` after login
+unless told otherwise, and the setting that says "go back to the app" was
+missing. **"I logged in and got a 404": check whether they're logged in before
+debugging the login.**
+
+## Production reality check
+
+What this lab does vs. what a real SaaS company would do. The full list is in
+[`docs/known-gaps.md`](../../docs/known-gaps.md).
+
+- ✅ **Closed: anyone could read any company's data.** The 🔴 gap from Lesson 1
+  is fixed by Slice 2, with a test per endpoint. (GAP-006)
+- 🟠 **Login cookies can travel over plain HTTP.** Fine on `localhost`. In
+  production, cookies get the `Secure` flag and everything runs over HTTPS, or
+  someone on the same café Wi-Fi can copy a cookie and *be* that user.
+  (GAP-013)
+- 🟡 **The login form itself isn't CSRF-protected.** A malicious site could
+  log your browser into *its* account, and you might then type private
+  details into the wrong place. `SameSite` blunts most of this. (GAP-014)
+- 🟠 **The login limit counts per internet address only.** A whole office
+  behind one address gets locked out together, and an attacker with many
+  addresses gets around it. Production adds a second limit per username.
+  (GAP-015)
+- 🟡 **JWTs can't be cancelled.** A stolen access token works until it expires
+  (15 minutes), and a stolen refresh token for a day. Production keeps a
+  blocklist of cancelled tokens. (GAP-016)
+- 🟡 **allauth brought a second password login page** (`/accounts/login/`) with
+  its own rules. Production picks one front door. (GAP-017)
+
+## Support takeaways
+
+**"I can't log in": find out which step failed. The status code tells you.**
+
+| They see | Code | It means | What to do |
+|---|---|---|---|
+| "Invalid username or password" | `400` | The login attempt failed | Check the username, then caps lock. Offer a reset |
+| "Credentials were not provided" | `401` | The system doesn't know who they are | Log in again: session expired, cookie blocked, or token expired |
+| "Not found" on a company page | `404` | Not a member of that company (or it doesn't exist) | Check their memberships. Wrong workspace link? |
+| "Forbidden" with a reason | `403` | Logged in, member, but their role can't do this | Check their role. A viewer trying to write? |
+| "CSRF Failed: …" | `403` | The page's safety token or origin check failed | Reload the page. If it keeps happening, escalate: a proxy or setting is wrong |
+| "Too many requests" | `429` | Too many tries in a short time | Wait for `Retry-After`. A whole office at once? Shared address |
+| Google: `redirect_uri_mismatch` | Google's `400` | The app's Google settings don't match its address | Escalate: a configuration problem, not the user's |
+
+**Next time, check in this order:**
+
+1. **Ask for the exact message, or a screenshot.** "It says forbidden" and "it
+   says not found" are different tickets. The words matter more than the
+   customer's summary.
+2. **Ask what they were trying to do.** Logging in, opening a page, or saving
+   something? A failure only on save points at their role.
+3. **Look them up.** Which companies do they belong to, with which role?
+   That's what `/api/me/` returns for them, or the memberships table for you.
+4. **Ask what changed.** A new device, a password change, an admin script, a
+   new office? "I keep getting logged out" often comes from something the user
+   never touched.
+
+**Questions to ask the customer:** What exact message do you see? Which
+workspace, or what address, were you on? Were you logging in, viewing, or
+saving? Are colleagues in the same office having the same problem? Did you
+sign in with a password or with Google?
+
+**When to escalate:**
+
+- **Anything with "CSRF"** that a page reload doesn't fix.
+- **`redirect_uri_mismatch`** or any error on Google's own page. The
+  configuration is wrong, and no user action fixes it.
+- **"Google works but my password doesn't"** on an account nobody can explain.
+  It may mean someone else set that password.
+- **A whole office locked out at once.** One person can't cause that, unless
+  they all share one address.
+
+## Next
+
+Lesson 3 builds support's own tools: an admin panel, **impersonation** (seeing
+exactly what a customer sees, safely and on the record), and **feature flags**,
+which explain the ticket *"why does it work for them and not for me?"*.
