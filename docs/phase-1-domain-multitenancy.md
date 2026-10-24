@@ -1,6 +1,6 @@
 # Phase 1 — Domain Model & Multi-Tenancy
 
-**Status:** 🚧 In progress
+**Status:** ✅ Verified — merged to `main` 2026-10-07 (PR #1)
 
 **Goal:** model Deskly's core objects and enforce **tenant isolation** — an org
 can only ever see its own data. This is what turns "a web app" into "a SaaS."

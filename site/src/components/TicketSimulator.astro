@@ -1,0 +1,147 @@
+---
+// A practice ticket. The reader picks checks, sees the real output each one
+// would give, and names the cause. Each run hides a random variant, so the
+// same ticket can be practised more than once. Scenario data lives in
+// src/scenarios/; see types.ts for its shape.
+import type { Scenario } from "../scenarios/types";
+
+interface Props {
+  scenario: Scenario;
+}
+const { scenario } = Astro.props;
+---
+
+<div class="sim not-content" data-scenario={JSON.stringify(scenario)}>
+  <div class="sim-head">
+    <strong>{scenario.title}</strong>
+    <span class="sim-clock" aria-live="polite">Customer waiting: 0 min</span>
+  </div>
+  <div class="sim-body">
+    <p class="sim-start-text">
+      A ticket has just landed. Something is broken, and you don't know what.
+      Choose your checks carefully: every one takes time, and the customer is
+      waiting.
+    </p>
+    <button type="button" class="primary sim-start">Start the ticket</button>
+    <noscript><p>The simulator needs JavaScript.</p></noscript>
+  </div>
+</div>
+
+<script>
+  import type { Scenario, Variant } from "../scenarios/types";
+
+  function el<K extends keyof HTMLElementTagNameMap>(tag: K, className = "", text = "") {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text) node.textContent = text;
+    return node;
+  }
+
+  for (const root of document.querySelectorAll<HTMLElement>(".sim")) {
+    const scenario: Scenario = JSON.parse(root.dataset.scenario!);
+    const body = root.querySelector<HTMLElement>(".sim-body")!;
+    const clock = root.querySelector<HTMLElement>(".sim-clock")!;
+    let lastVariant = "";
+
+    function start() {
+      const choices = scenario.variants.filter((v) => v.id !== lastVariant);
+      const variant = choices[Math.floor(Math.random() * choices.length)];
+      lastVariant = variant.id;
+      run(variant);
+    }
+
+    function run(variant: Variant) {
+      let minutes = 0;
+      let checks = 0;
+      const tick = (m: number) => {
+        minutes += m;
+        clock.textContent = `Customer waiting: ${minutes} min`;
+      };
+      tick(0);
+      body.replaceChildren();
+
+      body.append(el("pre", "sim-ticket", scenario.ticket));
+
+      const log = el("div", "sim-log");
+      log.setAttribute("aria-live", "polite");
+
+      body.append(el("p", "sim-label", "What do you check?"));
+      const actions = el("div", "sim-actions");
+      for (const action of scenario.actions) {
+        const button = el("button");
+        button.type = "button";
+        button.append(el("span", "", action.label), el("span", "sim-cost", `${action.minutes} min`));
+        button.addEventListener("click", () => {
+          button.disabled = true;
+          checks++;
+          tick(action.minutes);
+          const result = variant.results[action.id];
+          const entry = el("div", "sim-entry");
+          entry.append(el("p", "", `${action.label} (+${action.minutes} min)`));
+          if (action.command) entry.append(el("p", "sim-cmd", `$ ${action.command}`));
+          if (result.output) entry.append(el("pre", "", result.output));
+          entry.append(el("p", "", result.text));
+          log.append(entry);
+          entry.scrollIntoView({ block: "nearest", behavior: "smooth" });
+        });
+        actions.append(button);
+      }
+      body.append(actions, log);
+
+      body.append(el("p", "sim-label", "Found it? Name the broken part and fix it:"));
+      const causes = el("div", "sim-causes");
+      for (const cause of scenario.causes) {
+        const button = el("button", "", cause.label);
+        button.type = "button";
+        button.addEventListener("click", () => {
+          if (cause.id !== variant.cause) {
+            button.disabled = true;
+            tick(scenario.wrongFixMinutes);
+            const entry = el("div", "sim-entry bad");
+            entry.append(
+              el("p", "", `You went after: ${cause.label} (+${scenario.wrongFixMinutes} min)`),
+              el("p", "", "The customer replies: \"Still broken.\" That wasn't it. Keep investigating."),
+            );
+            log.append(entry);
+            entry.scrollIntoView({ block: "nearest", behavior: "smooth" });
+            return;
+          }
+          finish(variant, cause.label, minutes, checks);
+        });
+        causes.append(button);
+      }
+      body.append(causes);
+    }
+
+    function finish(variant: Variant, label: string, minutes: number, checks: number) {
+      const verdict =
+        checks === 0 ? "Lucky guess. Right answer, but with no evidence. In real life, check before you fix."
+        : minutes <= 5 ? "Excellent. Straight to the cause."
+        : minutes <= 15 ? "Good. You got there."
+        : "Solved, but slowly. Compare your route with the fastest one below.";
+
+      const result = el("div", "sim-result");
+      result.append(
+        el("h4", "", `Solved: ${label}`),
+        el("p", "", `${minutes} minutes, ${checks} check${checks === 1 ? "" : "s"}. ${verdict}`),
+        el("p", "sim-label", "The fix"),
+        el("pre", "", `$ ${variant.fix.command}`),
+        el("p", "", variant.fix.text),
+        el("p", "sim-label", "Fastest route"),
+        el("p", "", variant.fastest),
+      );
+      const foot = el("div", "sim-foot");
+      const again = el("button", "primary", "Try another ticket");
+      again.type = "button";
+      again.addEventListener("click", start);
+      foot.append(again);
+      result.append(foot);
+
+      body.querySelectorAll<HTMLButtonElement>(".sim-actions button, .sim-causes button").forEach((b) => (b.disabled = true));
+      body.append(result);
+      result.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
+
+    root.querySelector(".sim-start")!.addEventListener("click", start);
+  }
+</script>

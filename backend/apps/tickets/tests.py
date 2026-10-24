@@ -1,7 +1,6 @@
 from django.test import TestCase
-
-from apps.organizations.models import Organization
-
+from django.contrib.auth import get_user_model
+from apps.organizations.models import Membership, Organization
 from .models import Comment, Ticket
 
 
@@ -11,6 +10,9 @@ class TenantIsolationTests(TestCase):
         self.globex = Organization.objects.create(name="Globex", slug="globex")
         Ticket.objects.create(organization=self.acme, subject="Printer won't work")
         Ticket.objects.create(organization=self.globex, subject="Globex merger plans")
+        self.adam = get_user_model().objects.create_user("adam", password="pw")
+        Membership.objects.create(organization=self.acme, user=self.adam)
+        self.client.force_login(self.adam)
 
     def test_for_org_returns_only_that_orgs_tickets(self):
         subjects = [t.subject for t in Ticket.objects.for_org(self.acme)]
@@ -39,3 +41,33 @@ class TenantIsolationTests(TestCase):
             organization=self.acme, ticket=globex_ticket, body="Who owns me?"
         )
         self.assertEqual(comment.organization, self.globex)            
+
+    def test_non_member_cannot_list_another_orgs_tickets(self):
+        gary = get_user_model().objects.create_user("gary", password="pw")
+        Membership.objects.create(organization=self.globex, user=gary)
+        self.client.force_login(gary)
+        response = self.client.get("/api/orgs/acme/tickets/")
+        self.assertEqual(response.status_code, 404)
+
+    def test_viewer_cannot_create_a_ticket(self):
+        vera = get_user_model().objects.create_user("vera", password="pw")
+        Membership.objects.create(
+            organization=self.acme, user=vera, role=Membership.Role.VIEWER
+        )
+        self.client.force_login(vera)
+        response = self.client.post(
+            "/api/orgs/acme/tickets/",
+            {"subject": "Vera was here"},
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(Ticket.objects.filter(subject="Vera was here").exists())
+
+    def test_viewer_can_still_read_tickets(self):
+        vera = get_user_model().objects.create_user("vera", password="pw")
+        Membership.objects.create(
+            organization=self.acme, user=vera, role=Membership.Role.VIEWER
+        )
+        self.client.force_login(vera)
+        response = self.client.get("/api/orgs/acme/tickets/")
+        self.assertEqual(response.status_code, 200)       

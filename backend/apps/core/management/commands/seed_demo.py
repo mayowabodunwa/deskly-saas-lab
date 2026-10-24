@@ -1,9 +1,10 @@
 from django.core.management.base import BaseCommand
 from django.db import transaction
-
-from apps.organizations.models import Organization
+from django.contrib.auth import get_user_model
+from apps.organizations.models import Membership, Organization
 from apps.tickets.models import Ticket
 
+DEMO_PASSWORD = "deskly-demo"  # local demo only, never a real password
 
 class Command(BaseCommand):
     help = "Create demo organizations and tickets for local development."
@@ -33,6 +34,25 @@ class Command(BaseCommand):
             organization=globex,
             subject="Globex merger plans - confidential",
             defaults={"body": "Do not share outside Globex."},
-        )
+       )
+        User = get_user_model()
+        people = [
+            ("olivia", acme, Membership.Role.OWNER),
+            ("adam", acme, Membership.Role.AGENT),
+            ("vera", acme, Membership.Role.VIEWER),
+            ("gary", globex, Membership.Role.AGENT),
+        ]
+        for username, org, role in people:
+            user, _ = User.objects.get_or_create(username=username)
+            if not user.check_password(DEMO_PASSWORD):
+                user.set_password(DEMO_PASSWORD)
+                user.save()
+
+            Membership.objects.update_or_create(
+                organization=org,
+                user=user,
+                defaults={"role": role},
+            )    
+
 
         self.stdout.write("Seeded demo data.")

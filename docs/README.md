@@ -21,15 +21,15 @@ architectural choices (think lightweight ADRs — Architecture Decision Records)
 
 ## Repository
 
-- GitHub: `cloudsenseiNG/deskly-saas-lab` (private)
+- GitHub: `mayowabodunwa/deskly-saas-lab` (private)
 
 ## Phase index
 
 | Phase | Notes | Status |
 |-------|-------|--------|
 | 0 — Foundation | [phase-0-foundation.md](phase-0-foundation.md) | ✅ Verified |
-| 1 — Domain model & multi-tenancy | [phase-1-domain-multitenancy.md](phase-1-domain-multitenancy.md) | 🚧 In progress |
-| 2 — Auth (sessions + JWT + OAuth + RBAC) | _to write_ | ⬜ Not started |
+| 1 — Domain model & multi-tenancy | [phase-1-domain-multitenancy.md](phase-1-domain-multitenancy.md) | ✅ Verified |
+| 2 — Auth (sessions + JWT + OAuth + RBAC) | [phase-2-auth.md](phase-2-auth.md) | ✅ Verified, PR open |
 | 3 — Admin, impersonation & feature flags | _to write_ | ⬜ Not started |
 | 4 — Async: Celery exports & scheduled email | _to write_ | ⬜ Not started |
 | 5 — AI: in-app assistant + MCP server | _to write_ | ⬜ Not started |
@@ -50,6 +50,8 @@ compiled from.
 | [known-gaps.md](known-gaps.md) | Risk register: every lab shortcut vs. what production does, and when it must be closed |
 | [troubleshooting-log.md](troubleshooting-log.md) | Append-only log of real errors, gotchas and dead ends. Errors quoted verbatim |
 | [concepts/](concepts/) | Plain-English system-design notes, one per concept |
+| [django-apps-map.md](django-apps-map.md) | Plain-English map of `backend/apps/`: what each app is for, why some have models, how an address finds its view, every endpoint |
+| [http-status-codes.md](http-status-codes.md) | The 4xx codes in plain English: what each means in Deskly, and what support does about it |
 | [django-orm-to-sql.md](django-orm-to-sql.md) | Translation table: every Django ORM call and the SQL it becomes, with Deskly examples |
 
 ## Published course

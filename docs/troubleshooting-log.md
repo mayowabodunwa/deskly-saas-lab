@@ -27,6 +27,524 @@ character.
 
 ---
 
+## 2026-10-24 — `GOTCHA` — Auth / OAuth — Google sign-in worked, then the password stopped working
+
+**Symptom**
+olivia's email was set to a Gmail address in the shell (`olivia.email = …`),
+and "Sign in with Google" logged in as olivia. Afterwards, olivia's normal
+login with `deskly-demo` failed, and:
+
+```
+>>> olivia.has_usable_password()
+False
+```
+
+Her password hash now started with `!`.
+
+**What it means**
+Something replaced the password with one that can never match. Nobody had
+changed it by hand.
+
+**Root cause**
+allauth did it, on purpose. When a Google email matches a user whose email
+isn't recorded as **verified** in allauth's own `EmailAddress` table, allauth
+calls `set_unusable_password()`. Setting `User.email` doesn't count as
+verified. The attack it prevents: someone signs up with your email address
+before you do and keeps the password; when you later sign in with Google, you
+both have the account. Wiping the password locks that person out. (Code:
+`allauth/socialaccount/internal/flows/email_authentication.py`,
+`wipe_password`.)
+
+**Fix**
+`make seed` restored the password (the seed resets any demo password that
+doesn't match). Then, in the shell, the email was recorded as verified:
+
+```python
+EmailAddress.objects.update_or_create(
+    user=olivia, email=olivia.email,
+    defaults={"verified": True, "primary": True},
+)
+```
+
+The `SocialAccount` link from the first login was deleted, so the next Google
+login went through the email check again. The password survived it.
+
+**Lesson**
+"Google login worked, and now my password doesn't" isn't a bug report about
+passwords. It means the email on that account was never verified. Check
+allauth's email table before resetting anything.
+
+---
+
+## 2026-10-24 — `ERROR` — Auth / OAuth — After Google sign-in, a 404 for `accounts/profile/`
+
+**Symptom**
+After choosing a Google account, the browser landed on a Django 404:
+
+```
+The current path, accounts/profile/, didn’t match any of these.
+```
+
+**What it means**
+Something sent the browser to `/accounts/profile/`, an address Deskly
+doesn't have.
+
+**Root cause**
+After any successful login, Django redirects to `LOGIN_REDIRECT_URL`, and the
+built-in default is `/accounts/profile/`. The line
+`LOGIN_REDIRECT_URL = "/"` had been left out of `settings.py`. The login itself
+had worked: opening `http://localhost:5173` showed olivia logged in.
+
+**Fix**
+`LOGIN_REDIRECT_URL = "/"` in `settings.py`.
+
+**Lesson**
+"I logged in and got a 404" usually means the login worked and the "where
+next" address is wrong. Check whether the person is logged in before debugging
+the login.
+
+---
+
+## 2026-10-24 — `ERROR` — Auth / OAuth — Google said `redirect_uri_mismatch`
+
+**Symptom**
+Opening `http://localhost:8000/accounts/google/login/` and clicking Continue
+showed, on Google's page:
+
+```
+You can't sign in because this app sent an invalid request. You can try again later, or contact the developer about this issue.
+Error 400: redirect_uri_mismatch
+```
+
+**What it means**
+Google refused the request. It's not a crash in Deskly: Deskly built the
+request and the browser delivered it.
+
+**Root cause**
+allauth builds the return address from the address you visited, so it asked
+Google to send the browser back to
+`http://localhost:8000/accounts/google/login/callback/`. The only address on
+the console list was `http://localhost:5173/accounts/google/login/callback/`.
+Same path, different port. My first guess was that the backend didn't know how
+to log in with Google, but reaching Google's page proves it did.
+
+**Fix**
+Start the login from the React app on 5173, not by adding 8000 to the list.
+The Vite proxy forwards `/accounts` with `changeOrigin: false`, so allauth
+builds the 5173 address, and the session cookie lands where the app runs.
+
+**Lesson**
+Google is strict here on purpose. The return address receives a one-time
+login code, so an unchecked address could hand that code to an attacker.
+
+*Support angle:* compare the `redirect_uri` under "see error details" with
+the console list. The usual culprits are a port, `http` vs `https`, `www.`
+vs none, or a trailing slash.
+
+---
+
+## 2026-10-24 — `GOTCHA` — Auth — A logged-in user could guess passwords with no limit
+
+**Symptom**
+Login was throttled to 5 a minute, and an anonymous curl loop got `429` on
+the sixth try. But logged in as adam, 8 wrong logins for olivia in a row gave:
+
+```
+[400, 400, 400, 400, 400, 400, 400, 400]
+```
+
+Never `429`.
+
+**What it means**
+The throttle didn't count this caller at all.
+
+**Root cause**
+The throttle was `AnonRateThrottle`, which only counts **anonymous** callers.
+`login_view` used the default login methods, so DRF read adam's session
+cookie before the view ran and saw a logged-in user. The throttle skipped
+him, even though the body asked about someone else. An attacker could sign
+up, log in as themselves, then guess anyone's password freely.
+
+**Fix**
+`@authentication_classes([])` on `login_view`. The view no longer reads the
+cookie, so every caller is anonymous and counted by IP. SimpleJWT's token
+view already worked this way, so `/api/auth/token/` never had the hole. Test:
+`test_logged_in_caller_is_throttled_too`.
+
+**Lesson**
+Check what a limit actually counts. "5 per minute" really meant "5 per minute
+for people who aren't logged in". On a login endpoint, who's sending doesn't
+matter; who's being guessed does.
+
+---
+
+## 2026-10-24 — `GOTCHA` — Auth — The login lockout disappeared when the backend restarted
+
+**Symptom**
+After 5 wrong passwords, login returned `429 Too Many Requests`. Then
+`docker compose restart backend`, and the next login attempt was let straight
+through.
+
+**What it means**
+The count of attempts was lost on restart. Nothing was saving it.
+
+**Root cause**
+DRF keeps throttle counts in Django's cache. With no `CACHES` setting, Django
+uses `LocMemCache`, which is the memory of a single Python process. A restart
+starts a new process with empty memory. In production it's worse: each
+gunicorn worker has its own memory and its own count, so the real limit is
+5 × the number of workers.
+
+**Fix**
+Point the cache at Redis, which every process shares and which doesn't
+restart with the backend:
+
+```python
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.redis.RedisCache",
+        "LOCATION": REDIS_URL,
+    }
+}
+```
+
+After that, still `429` after a restart.
+
+**Lesson**
+For any limit or lock, ask where the counter lives. Memory inside one
+process is lost on restart and isn't shared between processes.
+
+*Support angle:* "the lockout cleared itself" or "the limit works on one
+server but not another" points at state kept in the wrong place.
+
+---
+
+## 2026-10-23 — `GOTCHA` — Auth / Frontend — Logout worked with curl and failed in the browser
+
+**Symptom**
+In the React app at `http://localhost:5173`, login worked. Log out showed, in
+red:
+
+```
+CSRF Failed: Origin checking failed - http://localhost:5173 does not match any trusted origins.
+```
+
+The same logout with curl, sending the same token, returned `204`.
+
+**What it means**
+The token check passed. A second CSRF check, on the `Origin` header, failed.
+
+**Root cause**
+Browsers label every write with `Origin: http://localhost:5173`. Django
+compares that with the request's Host. The Vite dev proxy had
+`changeOrigin: true`, which rewrote the Host to `backend:8000` on the way
+through, so the two disagreed and Django treated it as a cross-site request.
+curl sends no `Origin` header, so the check never ran there.
+
+**Fix**
+`changeOrigin: false` in `frontend/vite.config.ts`, so the proxy keeps the
+browser's Host, as a production reverse proxy does. (The other fix,
+`CSRF_TRUSTED_ORIGINS`, was considered and not chosen; see the phase notes.)
+
+**Lesson**
+"Works with curl, fails in the browser" means the browser is adding something
+curl isn't. Find what, before changing settings.
+
+---
+
+## 2026-10-23 — `GOTCHA` — Auth — New login URLs gave 404: the code was in the wrong app
+
+**Symptom**
+`curl -i -c /tmp/fresh-cookies.txt http://localhost:8000/api/auth/csrf/` →
+Django's "Page not found (404)" page.
+
+**What it means**
+No URL pattern matched `/api/auth/csrf/`.
+
+**Root cause**
+The new `csrf` and `logout_view` views and their `path(...)` lines went into
+`organizations/views.py` and `organizations/urls.py` instead of `accounts`.
+Every `organizations` URL sits under `/api/orgs/`, so the address would have
+been `/api/orgs/auth/csrf/`, and even that is caught first by the
+`"<slug:slug>/"` pattern above it, which treats `auth` as a company slug. The
+views would also have crashed: `status` wasn't imported in that file.
+
+**Fix**
+`git restore` on the two `organizations` files, then the same code added to
+`accounts/views.py` and `accounts/urls.py`.
+
+**Lesson**
+A 404 on a URL you just added: check which `urls.py` it's in and what prefix
+that file is included under. See `docs/django-apps-map.md` for which app owns
+what.
+
+---
+
+## 2026-10-18 — `GOTCHA` — Auth / Testing — The members-only tests didn't cover the ticket list
+
+**Symptom**
+Deliberate break, reasoned rather than run. With the membership check removed
+from `ticket_list` (back to `Organization.objects.get(slug=slug)`), all eight
+tests would still pass, and gary could read Acme's tickets again.
+
+**What it means**
+The hole could reopen in one view with a green test suite.
+
+**Root cause**
+The ticket tests log in as adam, who **is** an Acme member, so they pass with
+or without the check. The four members-only tests in `organizations/tests.py`
+only visit `/api/orgs/<slug>/`, the company page. No test sent a non-member
+to `/api/orgs/acme/tickets/`.
+
+**Fix**
+
+```python
+def test_non_member_cannot_list_another_orgs_tickets(self):
+    gary = get_user_model().objects.create_user("gary", password="pw")
+    Membership.objects.create(organization=self.globex, user=gary)
+    self.client.force_login(gary)
+    response = self.client.get("/api/orgs/acme/tickets/")
+    self.assertEqual(response.status_code, 404)
+```
+
+Committed as `15946d0`. Nine tests.
+
+**Lesson**
+A test only protects the door it knocks on. Every org-scoped endpoint needs
+its own "non-member is refused" test. Same lesson as Phase 1 Slice 5, where the
+model test stayed green while the API leaked.
+
+---
+
+## 2026-10-18 — `ERROR` — Auth — One wrong capital letter crashed the whole server
+
+**Symptom**
+Every curl, to any page, got:
+
+```
+curl: (56) Recv failure: Connection reset by peer
+```
+
+**What it means**
+The server hung up without answering. An error page (404, 500) means the
+server is alive; a hang-up means it isn't running properly, usually because it
+crashed while loading.
+
+**Root cause**
+`docker compose logs --tail=30 backend`, read from the bottom:
+
+```
+  File "/app/apps/tickets/views.py", line 4, in <module>
+    from rest_framework.permissions import isAuthenticated
+ImportError: cannot import name 'isAuthenticated' from 'rest_framework.permissions' (/usr/local/lib/python3.12/site-packages/rest_framework/permissions.py). Did you mean: 'IsAuthenticated'?
+```
+
+Python names are case-sensitive. Django loads every view file at startup
+(through `urls.py`), so one bad import in one file stops every page.
+
+**Fix**
+`IsAuthenticated`, with a capital I. The dev server reloads on save.
+
+**Lesson**
+When the server hangs up, go to the logs, not to another curl. Same family as
+Phase 1's `Empty reply from server` from a missing `include` import.
+
+---
+
+## 2026-10-11 — `GOTCHA` — Auth — Running `make seed` logged every demo user out
+
+**Symptom**
+adam logged in and `/api/me/` returned him. After `make seed`, the same cookie
+got:
+
+```
+{"detail":"Authentication credentials were not provided."}
+```
+
+His password was still `deskly-demo`. Nothing about his account had changed on
+purpose.
+
+**What it means**
+His session was thrown away by the server. The cookie was fine; the server no
+longer accepted it.
+
+**Root cause**
+`seed_demo` called `user.set_password(DEMO_PASSWORD)` on every run. Each call
+makes a new hash with a new random salt, so the stored value changed even
+though the password didn't. Django stores a fingerprint of the password hash
+inside each session, and when that no longer matches, it treats it as a
+password change and logs the user out everywhere. That's a safety feature
+working as designed.
+
+**Fix**
+
+```python
+if not user.check_password(DEMO_PASSWORD):
+    user.set_password(DEMO_PASSWORD)
+    user.save()
+```
+
+Only a wrong password gets reset. Committed as `eed9e3e`.
+
+**Lesson**
+"I keep getting logged out" can come from something the user never touched:
+any script, import or migration that rewrites the password column, even with
+the same password.
+
+---
+
+## 2026-10-11 — `GOTCHA` — Auth — Anonymous `/api/me/` returned 403, not the expected 401
+
+**Symptom**
+Calling `/api/me/` with no cookie, I expected `401 Unauthorized`. Got:
+
+```
+HTTP/1.1 403 Forbidden
+{"detail":"Authentication credentials were not provided."}
+```
+
+**What it means**
+The status code says "I know who you are, and no". The body says "I don't know
+who you are". The body is right.
+
+**Root cause**
+With no `REST_FRAMEWORK` settings, DRF's login methods are session, then Basic.
+For anonymous requests it picks the status from the first method only. A real
+401 needs a `WWW-Authenticate` header, and session login has none, so DRF sends
+403. See the DRF docs section "Unauthorized and Forbidden responses".
+
+**Fix**
+None yet, on purpose. Slice 5 adds JWT, which does send
+`WWW-Authenticate: Bearer`; the order of the login methods will decide it then.
+
+*Resolved 2026-10-24 (Slice 5):* JWT is listed first, so this now returns
+`401` with `WWW-Authenticate: Bearer realm="api"`.
+
+**Lesson**
+Read the body, not just the number. A support engineer who stops at "403"
+checks permissions, when the person simply isn't logged in.
+
+---
+
+## 2026-10-11 — `GOTCHA` — Auth — A user created with `objects.create()` can never log in
+
+**Symptom**
+Deliberate break. After `User.objects.create(username="bob", password="deskly-demo")`,
+`authenticate(username="bob", password="deskly-demo")` returned `None`, while
+the same call for vera returned `<User: vera>`. In psql:
+
+```
+ username |                                         password
+----------+------------------------------------------------------------------------------------------
+ vera     | pbkdf2_sha256$870000$kZZCjJarO9n7X5gkYz55aN$g408XwR3MwbgT6Jo1CWPZazZnPo0DFeiJrysrVUgCkc=
+ bob      | deskly-demo
+```
+
+**What it means**
+bob's password was stored as plain text. Two failures at once: he can't log
+in, and anyone who can read the table can read his password.
+
+**Root cause**
+`objects.create()` writes whatever it's given into the column. Django expects
+`algorithm$rounds$salt$hash` there, can't read `deskly-demo` as a hash, and
+the check fails even with the right password.
+
+**Fix**
+
+```python
+bob.set_password("deskly-demo")
+bob.save()
+```
+
+Or create users with `User.objects.create_user(username, password=...)`, which
+calls `set_password()` for you.
+
+**Lesson**
+bob is right about his password; the account was created wrongly. From the
+database alone: every healthy password starts with an algorithm name. One that
+doesn't was written by a script, an import or a home-made admin tool.
+
+---
+
+## 2026-10-11 — `GOTCHA` — Tooling — "I can't see any users", while they were in the database
+
+**Symptom**
+After seeding, a query for users showed nothing. Checked from the backend: all
+five users were there.
+
+**What it means**
+The data was fine. The viewer was looking at a different copy.
+
+**Root cause**
+Not confirmed. The two likely ones: psql connected to the empty `postgres`
+database instead of `deskly`, or a psql or database tool on the Mac reaching
+the Mac's own Postgres on `localhost:5432` (there is one; see the port 5432
+clash from the concepts track).
+
+**Fix**
+
+```bash
+docker compose exec db psql -U deskly deskly
+```
+
+Runs psql inside the container and names the database. The prompt reads
+`deskly=#`.
+
+**Lesson**
+"I can't see it" often means "I'm looking at a different copy". Check where
+you're looking before you check what's there.
+
+---
+
+## 2026-10-09 — `GOTCHA` — Tooling / Site — Starlight's sidebar was empty, with no error
+
+**Symptom**
+After moving the course site onto Starlight, both lesson pages loaded fine,
+but the sidebar showed a "Course" heading with nothing under it. No warning and
+no error. The config looked right:
+
+```js
+sidebar: [{ label: "Course", items: [{ autogenerate: { directory: "course" } }] }],
+```
+
+**What it means**
+The automatic sidebar ran and matched **zero** lessons. An empty list is a
+valid result, so nothing complained.
+
+**Root cause**
+Starlight's `autogenerate` doesn't match pages by their URL (`/course/...`).
+It matches them by **file path**, measured from its usual folder,
+`src/content/docs/`. Our lessons live in `../content/course/`, so their paths
+start with `../content/course/`, and nothing started with `course/`.
+
+**Fix**
+
+```js
+autogenerate: { directory: "../content/course" }
+```
+
+**Lesson**
+"No results" and "broken" can look identical. When a list is unexpectedly
+empty, check what the filter is actually comparing against, not what you
+assume it compares. Here the URL and the file path were two different things
+that happened to look alike.
+
+The same migration also hit a loud error, which was the easier kind:
+
+```
+[AstroUserError] Invalid frontmatter props passed to the `<StarlightPage/>` component.
+  Hint:
+    pubDate: Expected type `"date"`, received `"Date"`
+    lesson: Required
+    phase: Required
+    ticket: Required
+```
+
+Starlight checks custom pages, like the home page, against the same schema as
+lessons. The lesson-only fields became optional.
+
+---
+
 ## 2026-10-07 — `GOTCHA` — Tooling / Site — `make site` did nothing, because a folder is called `site`
 
 **Symptom**

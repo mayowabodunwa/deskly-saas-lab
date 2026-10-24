@@ -158,7 +158,37 @@ convenience.)
 
 ---
 
-## 🔴 GAP-006 — Tenant resolution has no authorization behind it
+## ✅ GAP-006 (closed 2026-10-18) — Tenant resolution has no authorization behind it
+
+**Closed by:** Phase 2, Slice 2. `apps/organizations/access.py` adds
+`get_membership_or_404(request, slug)`, which looks up the caller's
+`Membership` in the org named by the URL, in one query. Both org-scoped views
+(`organization_detail`, `ticket_list`) use it, and both require
+`IsAuthenticated`. Commits `272d7c4` and `15946d0`.
+
+- Not logged in → `403` ("Authentication credentials were not provided.")
+- Logged in, not a member → `404`
+- Org doesn't exist → the same `404`, with the same body
+
+**Evidence:** checked by hand with curl as gary (Globex) against Acme: `404`
+on `/api/orgs/acme/tickets/`, and `403` with no login. Locked in by five
+tests: four in `organizations/tests.py::MembersOnlyTests` (member gets in,
+non-member gets 404, non-member and missing org give identical answers,
+anonymous refused) and
+`tickets/tests.py::test_non_member_cannot_list_another_orgs_tickets`. The
+last one was added because the first four only visit the company page:
+removing the check from `ticket_list` would have left every test green.
+
+**Note on 404 vs the Phase 1 plan:** Phase 1's notes said the closing test
+would assert `403`. It asserts `404`, following Phase 1's other rule: never
+confirm that a company exists to someone outside it.
+
+**Still true:** the check lives in each view. A new org-scoped view that
+forgets to call the helper reopens the hole for that view. Whatever Slice 3 does with roles, a test per
+endpoint is what actually holds the line.
+
+The original entry is kept below, unedited.
+
 
 **Where:** `backend/apps/organizations/views.py`, `backend/apps/organizations/urls.py`
 
@@ -416,6 +446,137 @@ they keep routing customers to a backend that can't reach its database.
 Also close it as soon as any uptime monitor or load balancer is pointed at it.
 
 Found while writing Lesson 0 (2026-10-07).
+
+---
+
+## 🟠 GAP-013 — Login cookies are allowed over plain HTTP
+
+**Where:** `backend/config/settings.py` (no `SESSION_COOKIE_SECURE` or
+`CSRF_COOKIE_SECURE`)
+
+The `sessionid` and `csrftoken` cookies have no `Secure` flag, so the browser
+will send them over plain HTTP. That's needed locally, where Deskly runs on
+`http://localhost`.
+
+**What production does:** sets `SESSION_COOKIE_SECURE = True` and
+`CSRF_COOKIE_SECURE = True`, serves everything over HTTPS, and redirects HTTP
+to HTTPS. Then a login cookie never travels where someone on the same network
+could read it and log in as that person.
+
+**Why it matters:** whoever holds the `sessionid` *is* that user until the
+session ends. A cookie sent in the clear can be copied.
+
+**Trigger to close:** Phase 7, the first deploy anywhere that isn't
+`localhost`. Read both settings from the environment, so local stays HTTP.
+
+Found in Phase 2, Slice 1 (2026-10-11).
+
+---
+
+## 🟡 GAP-014 — The login endpoint isn't CSRF-protected
+
+**Where:** `backend/apps/accounts/views.py` — `login_view`
+
+DRF's session auth checks CSRF only for requests from a user who is already
+logged in. A login request is anonymous by definition, so it skips the check.
+
+**The attack it allows ("login CSRF"):** `evil.com` silently logs the victim's
+browser into the **attacker's** Deskly account. Anything the victim then
+types, such as a ticket containing private details, lands in an account the
+attacker can read.
+
+**What production does:** enforces CSRF on the login view too, for example by
+calling `SessionAuthentication().enforce_csrf(request)` at the top of it, and
+the SPA fetches `/api/auth/csrf/` before showing the form (`Auth.tsx` already
+does). `SameSite=Lax` already blunts most of this in modern browsers, which is
+why it's 🟡 and not higher.
+
+**Trigger to close:** before any real user, alongside GAP-013. Cheap to do;
+remember a test with `Client(enforce_csrf_checks=True)`.
+
+Found in Phase 2, Slice 4 (2026-10-23).
+
+---
+
+## 🟠 GAP-015 — The login limit counts per IP address only
+
+**Where:** `backend/apps/accounts/throttles.py` — `LoginRateThrottle`
+(`AnonRateThrottle`, 5/minute)
+
+The limit counts attempts per **IP address**. That has two weak spots:
+
+- **Shared IPs lock out together.** Everyone in one office, or behind one
+  mobile carrier, has the same public IP. One person typing wrong locks out
+  all of them. Behind a load balancer it's worse: every request comes from the
+  balancer's IP unless DRF is told to read `X-Forwarded-For`
+  (`NUM_PROXIES`), so one bad guesser locks out every user.
+- **Many IPs get around it.** An attacker with 1,000 IPs gets 5,000 guesses a
+  minute, and can spread them across one victim's account.
+
+**What production does:** adds a second limit **per username** (say 10 failed
+attempts an hour per account, whatever the IP), sets `NUM_PROXIES` to match
+the real proxy setup, and often adds a CAPTCHA or an emailed unlock after
+repeated failures. Libraries like `django-axes` do the per-account part.
+
+**Trigger to close:** Phase 7, when Deskly first runs behind a load balancer
+(`NUM_PROXIES` becomes required then, or every user shares one IP). The
+per-username limit before any real user.
+
+Found in Phase 2, Slice 5 (2026-10-24).
+
+---
+
+## 🟡 GAP-016 — JWTs can't be cancelled before they expire
+
+**Where:** `backend/config/settings.py` — `SIMPLE_JWT` (no blacklist app, no
+refresh rotation)
+
+A session can be ended at once by deleting its row (Slice 1). A JWT can't:
+the server checks the signature and looks nothing up, so a stolen access token
+works until it expires (15 minutes), and a stolen refresh token keeps making
+new access tokens for a day. Logout and password changes don't affect either.
+
+**What production does:** turns on SimpleJWT's token blacklist
+(`rest_framework_simplejwt.token_blacklist` in `INSTALLED_APPS`) with
+`ROTATE_REFRESH_TOKENS` and `BLACKLIST_AFTER_ROTATION`, so each refresh token
+works once and can be cancelled. The 15-minute access lifetime stays as the
+limit on a stolen access token.
+
+**Why it's 🟡:** no script uses tokens yet, and the browser doesn't use JWT
+at all.
+
+**Trigger to close:** when the first real script or API client gets tokens
+(Phase 6, the public API), or earlier if "log out everywhere" is needed.
+
+Found in Phase 2, Slice 5 (2026-10-24).
+
+---
+
+## 🟡 GAP-017 — allauth adds a second password login page with different rules
+
+**Where:** `backend/config/urls.py` — `path("accounts/", include("allauth.urls"))`
+
+Including all of allauth's URLs for Google sign-in also switched on its own
+pages. Sign-up is closed (`NoSignupAdapter`), but these still work:
+
+- **`/accounts/login/`**: a second username + password login (returns 200).
+  It isn't covered by our `LoginRateThrottle` (5/minute). allauth limits it
+  itself, to 10 failed tries a minute per IP and 5 per 5 minutes per
+  username, so it isn't unprotected. But there are now two front doors with
+  two different rules.
+- **`/accounts/password/reset/`** and friends: password reset by email.
+  Django has no email server set up, so this would fail or go nowhere.
+
+**What production does:** decides on **one** password login. Either use
+allauth's pages for everything, or expose only the Google URLs and block the
+rest. Either way, one throttle rule applies to all password logins, and a
+test asserts the unused pages return 404.
+
+**Trigger to close:** before any real user, or when email sending is set up
+(Phase 4 sends email), whichever comes first. Whoever sets up email decides
+whether allauth's reset flow stays.
+
+Found in Phase 2, Slice 6 (2026-10-24).
 
 ---
 

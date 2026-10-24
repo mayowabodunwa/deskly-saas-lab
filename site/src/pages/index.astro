@@ -1,27 +1,67 @@
 ---
-import Base from "../layouts/Base.astro";
-import { getLessons, getArticles } from "../lib/content";
+import StarlightPage from "@astrojs/starlight/components/StarlightPage.astro";
+import { getCollection } from "astro:content";
 
-const lessons = await getLessons();
-const articles = await getArticles();
+// Drafts show while developing and are left out of real builds, matching
+// how Starlight itself treats `draft: true` pages.
+const lessons = (await getCollection("docs", ({ data }) => import.meta.env.DEV || !data.draft))
+  .filter((entry) => entry.id.startsWith("course/"))
+  .sort((a, b) => (a.data.lesson ?? 0) - (b.data.lesson ?? 0));
+const first = lessons[0];
 ---
 
-<Base title="Support Engineering by Building Systems" description="Learn how software systems work by building one, breaking it on purpose, and diagnosing it the way a real ticket arrives.">
-  <section class="hero">
-    <h1>Support Engineering by Building Systems</h1>
-    <p class="lede">
-      Learn how software systems actually work by building one, breaking it on
-      purpose, and diagnosing it the way a real ticket arrives.
-    </p>
-    <a class="button" href="/course/">Start the course</a>
-  </section>
+<StarlightPage
+  frontmatter={{
+    title: "Support Engineering by Building Systems",
+    description: "Learn how software systems work by building one, breaking it on purpose, and diagnosing it the way a real ticket arrives.",
+    template: "splash",
+    hero: {
+      tagline:
+        "Learn how software systems actually work by building one, breaking it on purpose, and diagnosing it the way a real ticket arrives.",
+      actions: first
+        ? [{ text: "Start the course", link: `/${first.id}/`, icon: "right-arrow", variant: "primary" }]
+        : [],
+    },
+  }}
+>
+  <h2>How every lesson works</h2>
+  <ol>
+    <li><strong>A real support ticket</strong> opens the lesson: vague, worried, missing detail.</li>
+    <li><strong>Build</strong> the part of the system that ticket is about, on your own laptop.</li>
+    <li><strong>Break it on purpose</strong> and work out what went wrong from what you can see.</li>
+    <li><strong>Practise</strong>: quizzes and a ticket simulator, then a checklist for next time.</li>
+  </ol>
 
-  <h2>Course</h2>
-  <p>{lessons.length} lesson{lessons.length === 1 ? "" : "s"} so far, each built around a real support ticket.</p>
-  <a href="/course/">See all lessons →</a>
+  <h2>Lessons</h2>
+  <p class="progress-summary" data-total={lessons.length} hidden></p>
+  <ol class="lesson-list">
+    {lessons.map((lesson) => (
+      <li data-lesson={lesson.id}>
+        <a href={`/${lesson.id}/`}>
+          <span class="lesson-number">Lesson {lesson.data.lesson}</span>
+          <span class="lesson-title">{lesson.data.title.replace(/^Lesson \d+:\s*/, "")}</span>
+          <span class="lesson-ticket">“{lesson.data.ticket}”</span>
+        </a>
+        <span class="lesson-status">
+          {lesson.data.draft && <span class="badge">Draft</span>}
+          <span class="badge done-badge" hidden>✓ Done</span>
+        </span>
+      </li>
+    ))}
+  </ol>
+</StarlightPage>
 
-  <h2>Articles</h2>
-  {articles.length === 0
-    ? <p class="muted">No articles yet.</p>
-    : <ul class="card-list">{articles.map((a) => <li><a href={`/articles/${a.id}/`}>{a.data.title}</a></li>)}</ul>}
-</Base>
+<script>
+  import { load } from "../lib/progress";
+  const progress = load();
+  let done = 0;
+  for (const item of document.querySelectorAll<HTMLElement>("[data-lesson]")) {
+    if (progress.lessons[item.dataset.lesson!]) {
+      item.querySelector<HTMLElement>(".done-badge")!.hidden = false;
+      done++;
+    }
+  }
+  const summary = document.querySelector<HTMLElement>(".progress-summary")!;
+  summary.textContent = `You've completed ${done} of ${summary.dataset.total} lessons.`;
+  summary.hidden = done === 0;
+</script>

@@ -1,0 +1,11 @@
+---
+// Wraps Starlight's own footer: lesson pages get a "mark complete" button
+// above the previous/next links.
+import Default from "@astrojs/starlight/components/Footer.astro";
+import LessonComplete from "./LessonComplete.astro";
+
+const { id } = Astro.locals.starlightRoute;
+---
+
+{id.startsWith("course/") && <LessonComplete id={id} />}
+<Default />
