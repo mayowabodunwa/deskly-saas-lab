@@ -62,6 +62,83 @@ tickets   ──points to─►  organizations
 Arrows should only go one way. If two apps need each other, the topic is
 probably split in the wrong place.
 
+## How an address finds its view
+
+Think of a phone switchboard. `config/urls.py` is the main reception: it reads
+the **start** of the address and puts the call through to an app. Each app's
+`urls.py` is that app's own receptionist: it reads the **rest** and puts the
+call through to a view.
+
+| Word | Meaning |
+|---|---|
+| `path("x/", view)` | If the address is `x/`, send it to this view |
+| `include("apps.x.urls")` | Cut off the part matched so far and hand the **rest** to that app's `urls.py` |
+| `<slug:slug>` | A blank to fill in. Whatever is there (`acme`) reaches the view as `slug` |
+| `SomeView.as_view()` | Turns a ready-made class-based view (like SimpleJWT's) into something `path()` accepts |
+
+### The five files
+
+**`config/urls.py`**, the main reception:
+
+| Address starts with | Handed to |
+|---|---|
+| `admin/` | Django's admin |
+| `api/` | `core` |
+| `api/orgs/` | `organizations` |
+| `api/` | `accounts` |
+
+Two lines say `api/`, and that's fine: Django tries lines **top to bottom**,
+and if `core` has no match for the rest of the address, it moves on to the next
+line. `/api/health/` is found in `core`; `/api/me/` falls through to
+`accounts`.
+
+**`core/urls.py`** (Phase 0): `health/`.
+
+**`accounts/urls.py`** (Phase 2, who you are): `auth/login/`, `me/`,
+`auth/csrf/`, `auth/logout/`, `auth/token/`, `auth/token/refresh/`.
+
+**`organizations/urls.py`** (Phase 1, one company): `<slug:slug>/` for the
+company's details, and `<slug:slug>/` + `include("apps.tickets.urls")` to hand
+everything deeper to `tickets`. This is **nesting**: ticket addresses live
+inside a company's address.
+
+**`tickets/urls.py`** (Phase 1, tickets inside a company): `tickets/`.
+
+### Following one address all the way
+
+`GET /api/orgs/acme/tickets/`:
+
+```
+config/urls.py         "api/orgs/" matches → rest "acme/tickets/"           → organizations
+organizations/urls.py  "<slug>/"   matches → slug="acme", rest "tickets/"  → tickets
+tickets/urls.py        "tickets/"  matches → ticket_list(request, slug="acme")
+ticket_list            logged in? → member? → (writing: role allowed?) → answer
+```
+
+### Every endpoint today
+
+| Address | App | Who can use it | Added |
+|---|---|---|---|
+| `/api/health/` | core | Anyone | Phase 0 |
+| `/api/auth/login/` | accounts | Anyone | Phase 2, Slice 1 |
+| `/api/me/` | accounts | Logged in | Phase 2, Slice 1 |
+| `/api/auth/csrf/` | accounts | Anyone | Phase 2, Slice 4 |
+| `/api/auth/logout/` | accounts | Logged in (sessions also need the CSRF token) | Phase 2, Slice 4 |
+| `/api/auth/token/` | accounts | Anyone with a correct password | Phase 2, Slice 5 |
+| `/api/auth/token/refresh/` | accounts | Anyone with a valid refresh token | Phase 2, Slice 5 |
+| `/api/orgs/<company>/` | organizations | Members of that company | Phase 1; members-only since Phase 2, Slice 2 |
+| `/api/orgs/<company>/tickets/` | tickets | Members read; agents and owners write | Phase 1; roles since Phase 2, Slice 3 |
+
+`/api/orgs/` on its own is only a prefix, so it returns 404. If it ever lists
+companies, it must list only the caller's own, or it becomes GAP-006 again.
+
+### Two traps already hit
+
+- **Wrong file, wrong prefix.** Code put in `organizations/urls.py` lives under
+  `/api/orgs/`. That's why `/api/auth/csrf/` was a 404 in Slice 4.
+- **Order matters.** Django stops at the first match, and `<slug:slug>/`
+  matches any word, so a line listed after it can be swallowed.
+
 ## Deciding where new code goes
 
 When you plan a feature, ask three questions:
