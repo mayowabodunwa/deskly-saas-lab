@@ -27,6 +27,57 @@ character.
 
 ---
 
+## 2026-10-25 — `ERROR` — Course site — Lessons vanished after a branch switch, and a restart wouldn't start
+
+**Symptom**
+Right after `git checkout -b phase-3-admin`, the course site at
+`http://localhost:4321` returned `500` on the home page and `404` on every
+lesson. The site log showed `Clearing content store` at the moment of the
+switch, then:
+
+```
+[ERROR] Cannot find module 'virtual:starlight/route-middleware' imported from '/site/node_modules/@astrojs/starlight/dist/utils/routing/middleware.js'
+```
+
+`docker compose --profile site restart site` then left the container exited,
+with:
+
+```
+Another astro dev server is already running.
+
+  URL:  http://localhost:4321
+  PID:  19
+
+Run `astro dev stop` to stop it, or use `astro dev --force` to replace it.
+```
+
+**What it means**
+Two problems. The dev server lost its content when the files under it
+changed all at once (the known branch-switch gotcha). Then the restart was
+refused because Astro thought an old server was still alive.
+
+**Root cause**
+Astro writes a lock file, `site/.astro/dev.json`, with the process id of the
+running server. Ours was left over from 2026-10-09 (`"pid": 19`). Process ids
+start again from 1 in every new container, so in the restarted container some
+process *was* number 19, and Astro believed the old server was still running.
+The file lives in the bind-mounted `site/` folder, so it outlives containers.
+
+**Fix**
+
+```bash
+rm site/.astro/dev.json          # generated, git-ignored
+docker compose --profile site up -d site
+```
+
+**Lesson**
+A "process id" lock only makes sense on one machine. Copied into containers,
+where every container restarts the count, it can point at a stranger. After
+switching branches, restart the site; if it says another server is running,
+delete the stale lock.
+
+---
+
 ## 2026-10-24 — `GOTCHA` — Auth / OAuth — Google sign-in worked, then the password stopped working
 
 **Symptom**
