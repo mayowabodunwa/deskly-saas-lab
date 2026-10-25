@@ -80,3 +80,7 @@ Rough notes written in the moment are the honest ones. Polish comes later.
   one-line plain-English definition right there.
 
 Start a new article by copying [`_TEMPLATE.md`](_TEMPLATE.md).
+
+---
+
+© 2026 Mayowa Bodunwa. All rights reserved. See [`../LICENSE`](../LICENSE).

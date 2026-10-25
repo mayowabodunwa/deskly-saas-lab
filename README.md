@@ -101,3 +101,9 @@ Open `.claude/skills/saas-lab/SKILL.md` for the full map.
   API in Phase 5 — kept to cents.
 - This is a learning lab, not a product: real billing, a customer portal, and scale
   tuning are out of scope (great stretch goals once the core works).
+
+## License
+
+- **Code** (everything outside `content/`): [MIT](LICENSE). Use it however you like.
+- **Course lessons** (`content/`): © 2026 Mayowa Bodunwa, all rights reserved.
+  Read and link freely; don't copy or republish. See [`content/LICENSE`](content/LICENSE).
