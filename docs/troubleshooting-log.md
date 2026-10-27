@@ -27,6 +27,57 @@ character.
 
 ---
 
+## 2026-10-27 — `GOTCHA` — Phase 3 / Slice 1 — Changed `.env`, restarted, nothing changed
+
+**Symptom**
+Added `ADMIN_URL=deskly-admin/` to `.env`, ran `docker compose restart backend`.
+`http://localhost:8000/admin/` still opened the admin and
+`http://localhost:8000/deskly-admin/` returned `404`. No error anywhere; the
+code in `settings.py` and `urls.py` was correct.
+
+**What it means**
+Django was still using the default (`admin/`), so
+`os.environ.get("ADMIN_URL")` found nothing. Asking the running container
+confirmed it; this printed nothing:
+
+```bash
+docker compose exec backend printenv ADMIN_URL
+```
+
+The file had the value. The running process didn't.
+
+**Root cause**
+Compose reads `env_file: [.env]` once, **when it creates the container**, and
+the values are fixed from then on. `docker compose restart` stops and starts
+the *same* container, so it never looks at `.env` again.
+
+**Fix**
+
+```bash
+docker compose up -d backend
+```
+
+`up` compares the container's settings with the files, sees `.env` changed,
+and creates a new container. `printenv ADMIN_URL` then printed
+`deskly-admin/`; `/deskly-admin/` opened the admin and `/admin/` returned
+`404`.
+
+| Command | Re-reads `.env`? | Use it when |
+|---|---|---|
+| `docker compose restart backend` | ❌ No | The app is stuck, or code changed |
+| `docker compose up -d backend` | ✅ Yes, recreates the container | `.env` changed |
+
+**Lesson**
+"The file says X" and "the process is using X" are two different facts.
+Check the second one directly (`printenv`, a debug endpoint, a log line at
+startup) before touching the code.
+
+*Support angle:* the classic *"I changed the config and nothing happened"*
+ticket. The first question isn't "is the config right?" but "has the running
+thing loaded it since you changed it?"
+
+---
+
 ## 2026-10-25 — `ERROR` — Course site — Lessons vanished after a branch switch, and a restart wouldn't start
 
 **Symptom**

@@ -102,9 +102,57 @@ Each slice: build it → break it on purpose → diagnose from symptoms → fix.
   (which wipes the database volume) deletes it, so run `createsuperuser`
   again afterwards.
 
+### Moving the admin off `/admin/`
+
+The address is a setting, not code: `ADMIN_URL` in `settings.py` reads the
+environment and defaults to `admin/`; `config/urls.py` uses
+`path(settings.ADMIN_URL, admin.site.urls)`. Your laptop keeps `admin/`; a
+real server sets its own hard-to-guess value in its `.env`, so the real
+address never lands in git.
+
+**What it protects, and what it doesn't** ("security through obscurity"):
+
+- ✅ Stops automated bots, which try `/admin/` on every site with lists of
+  common passwords. They never find the login page.
+- ❌ Doesn't stop someone aiming at you. The address leaks through browser
+  history, screenshots, links pasted into chat and server logs; once known,
+  the page is exactly as strong as before.
+
+It's an extra layer, never the lock. The lock is a strong password
+(GAP-018), `is_staff`, throttling, and in production 2FA or an
+office/VPN-only rule.
+
+### Break: a customer tries the admin
+
+Logging in as `adam` / `deskly-demo` (correct password) shows:
+
+```
+Please enter the correct username and password for a staff account. Note that both fields may be case-sensitive.
+```
+
+adam has `is_staff=False`. Being an owner at Acme is a role inside a
+*customer* company; `is_staff` means "works for Deskly", and the two are
+unrelated. The message is vague **on purpose**: it's the same for a wrong
+username, a wrong password and a non-staff user, so an attacker can't learn
+that a password was right or which usernames exist (account enumeration).
+
+Because the message won't say which it was, support checks the data:
+
+```bash
+docker compose exec backend python manage.py shell -c \
+  "from django.contrib.auth import get_user_model as g; u = g().objects.get(username='adam'); print(u.check_password('deskly-demo'), u.is_active, u.is_staff)"
+# True True False  -> right password, active, not staff
+```
+
+The fix is **not** to make adam staff: refusing a customer is correct.
+
 ## How to verify
 
 ```bash
+# Slice 1: which address is the admin on? (blank means the default, admin/)
+docker compose exec backend printenv ADMIN_URL
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8000/admin/login/   # 404 once ADMIN_URL is set
+
 # Slice 1: is there a staff account yet? (an empty list means no)
 docker compose exec backend python manage.py shell -c \
   "from django.contrib.auth import get_user_model as g; print(list(g().objects.filter(is_staff=True).values_list('username', 'is_superuser')))"
@@ -112,4 +160,11 @@ docker compose exec backend python manage.py shell -c \
 
 ## Gotchas
 
-- (none yet)
+- **`docker compose restart` doesn't re-read `.env`.** Compose reads it only
+  when it creates a container. After changing `.env`, run
+  `docker compose up -d backend`, then confirm with
+  `docker compose exec backend printenv ADMIN_URL`. See the troubleshooting
+  log, 2026-10-27.
+- **The admin's login error never says *why*.** Wrong username, wrong
+  password and "not staff" all show the same message. Check
+  `check_password`, `is_active` and `is_staff` in the shell instead.
