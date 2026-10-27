@@ -54,7 +54,7 @@ Decided at the start (2026-10-25):
 
 ## Build slices
 
-- [ ] Slice 1 — **Admin.** Register companies, members, tickets and comments
+- [x] Slice 1 — **Admin.** ✅ 2026-10-27. Register companies, members, tickets and comments
       with search; staff only; move it off `/admin/`.
 - [ ] Slice 2 — **Audit log.** `AuditLog` model, `record_audit()` helper,
       read-only in the admin.
