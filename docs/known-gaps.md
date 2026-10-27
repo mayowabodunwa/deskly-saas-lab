@@ -580,5 +580,30 @@ Found in Phase 2, Slice 6 (2026-10-24).
 
 ---
 
+## 🟠 GAP-018 — No password strength rules
+
+**Where:** `backend/config/settings.py` — `AUTH_PASSWORD_VALIDATORS` is not set
+
+Django only checks password strength if this setting lists validators. With
+none, any password is accepted, even `1`, for `createsuperuser`,
+`changepassword` and customer accounts alike. The admin is the most powerful
+page in the app, and its password is the only thing guarding it.
+
+**What production does:** sets Django's four standard validators (too similar
+to the username, a minimum length, on a list of common passwords, all
+numbers), usually with a minimum length of 12 or more. Staff accounts also get
+a second factor (2FA).
+
+**Why it's 🟠:** passwords are already stored as hashes and logins are
+throttled, but a guessable admin password defeats both.
+
+**Trigger to close:** before any real user or deployed environment, or when
+the admin is first reachable from outside localhost (Phase 7, AWS), whichever
+comes first.
+
+Found in Phase 3, Slice 1 (2026-10-27).
+
+---
+
 <!-- New gaps: assign the next GAP-NNN, pick a severity, and always fill in the
      trigger. A gap with no trigger becomes permanent by accident. -->

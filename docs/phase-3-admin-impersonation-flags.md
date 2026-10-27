@@ -67,10 +67,47 @@ Decided at the start (2026-10-25):
 
 Each slice: build it → break it on purpose → diagnose from symptoms → fix.
 
+## Slice 1 — Admin
+
+### How admin accounts and passwords work
+
+- **There is no default admin.** A fresh Deskly database has no staff users
+  at all, and no username or password is written anywhere in the code, seed
+  data or `.env`. Each person creates their own:
+
+  ```bash
+  docker compose exec backend python manage.py createsuperuser
+  # Username: admin   Email: (Enter to skip)   Password: you choose it
+  ```
+
+  The password is hidden as you type. Django can warn about weak or common
+  passwords, but only if `AUTH_PASSWORD_VALIDATORS` is set in
+  `settings.py`. **Deskly's isn't set**, so even `1` is accepted, both here
+  and for customer passwords. Fine for a local lab, never for production.
+- **Only a hash is stored.** Django never keeps the password itself. It
+  stores a one-way hash (PBKDF2 by default) in the `password` column of
+  `auth_user`, so nobody, not even someone who can read the database, can
+  look the password up. That's why there's no "show password" command.
+- **Forgot it? Set a new one; don't recover it.**
+
+  ```bash
+  docker compose exec backend python manage.py changepassword admin
+  ```
+
+- **Why no hardcoded admin:** a default login like `admin/admin` in the code
+  or seed data would end up in git and be the same on every copy of the app,
+  so anyone reading the repo could log into the most powerful page in it.
+  `seed_demo` creates only customer users (adam, …), never staff.
+- **The superuser lives only in your local database.** `docker compose down -v`
+  (which wipes the database volume) deletes it, so run `createsuperuser`
+  again afterwards.
+
 ## How to verify
 
 ```bash
-# filled in slice by slice
+# Slice 1: is there a staff account yet? (an empty list means no)
+docker compose exec backend python manage.py shell -c \
+  "from django.contrib.auth import get_user_model as g; print(list(g().objects.filter(is_staff=True).values_list('username', 'is_superuser')))"
 ```
 
 ## Gotchas
